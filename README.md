@@ -96,6 +96,31 @@ uvicorn bbot_server.asgi:application --host 127.0.0.1 --port 8000 --reload --lif
 
 ```bash
 celery -A bbot_server worker -l info
+celery -A bbot_server worker -l info --pool=solo -c 1
+```
+
+Windows 推荐（避免 billiard 权限问题）：
+
+```bash
+celery -A bbot_server worker -l info --pool=solo -c 1
+```
+
+## 定时任务（Cron Jobs）
+
+项目级定时任务统一放在 `bbot_server/cron_jobs/`。
+
+已提供回收站清理任务：
+
+```bash
+python manage.py cleanup_recycle_bin
+```
+
+建议每天凌晨执行一次。
+
+Linux crontab 示例（每天 00:00）：
+
+```bash
+0 0 * * * cd /path/to/bbot_server && /path/to/python manage.py cleanup_recycle_bin
 ```
 
 ## 接口路由（简要）
@@ -109,10 +134,10 @@ celery -A bbot_server worker -l info
 
 ```text
 bbot_server/
-	bbot_server/     # 项目配置（settings、urls、asgi、celery）
-	user/            # 用户/角色/权限与认证
-	bbot/            # 文件管理与上传业务
-	manage.py
+  bbot_server/     # 项目配置（settings、urls、asgi、celery）
+  user/            # 用户/角色/权限与认证
+  bbot/            # 文件管理与上传业务
+  manage.py
 ```
 
 ## 联调建议

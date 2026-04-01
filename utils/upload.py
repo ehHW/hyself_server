@@ -34,6 +34,9 @@ def get_user_relative_root(user) -> str:
 def get_user_upload_root(user) -> Path:
     target = get_upload_root() / Path(get_user_relative_root(user))
     target.mkdir(parents=True, exist_ok=True)
+    from bbot.recycle_bin import ensure_user_recycle_bin
+
+    ensure_user_recycle_bin(user)
     return target
 
 

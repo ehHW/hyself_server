@@ -1,7 +1,10 @@
 """
 WebSocket 消费者 - 处理客户端连接和消息
 """
+from celery.result import AsyncResult
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
+
+from bbot_server.celery import app as celery_app
 
 
 class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
@@ -61,6 +64,35 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
                 self.upload_task_groups.add(group_name)
 
             await self.send_json({"type": "upload_subscribed", "task_id": task_id})
+
+            # 兜底：如果客户端订阅晚于任务完成，回放 Celery 结果，避免前端一直等待 done/failed。
+            result = AsyncResult(task_id, app=celery_app)
+            if result.successful():
+                payload = result.result if isinstance(result.result, dict) else {}
+                await self.send_json(
+                    {
+                        "type": "upload_progress",
+                        "task_id": task_id,
+                        "status": "done",
+                        "progress": 100,
+                        "message": str(payload.get("message", "合并完成")),
+                        "relative_path": payload.get("relative_path", ""),
+                        "url": payload.get("url", ""),
+                    }
+                )
+                return
+
+            if result.failed():
+                failed_message = str(result.result) if result.result else "后台合并失败"
+                await self.send_json(
+                    {
+                        "type": "upload_progress",
+                        "task_id": task_id,
+                        "status": "failed",
+                        "progress": 100,
+                        "message": failed_message,
+                    }
+                )
             return
 
         # 取消订阅上传任务进度

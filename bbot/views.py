@@ -1,6 +1,8 @@
+from datetime import timedelta
 from pathlib import Path
 
 from django.http import JsonResponse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -8,6 +10,16 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from bbot.models import UploadedFile
+from bbot.recycle_bin import (
+    RECYCLE_BIN_EXPIRE_DAYS,
+    clear_recycle_bin,
+    ensure_user_recycle_bin,
+    is_recycle_bin_folder,
+    list_recycle_bin_entries,
+    move_entry_to_recycle_bin,
+    restore_entry_from_recycle_bin,
+)
+from bbot_server.celery import app as celery_app
 from bbot.tasks import merge_large_file_task
 from utils.upload import (
     build_stored_name,
@@ -104,6 +116,11 @@ def ensure_nested_parent(user, base_parent: UploadedFile | None, folders: list[s
 
 
 def file_item_payload(item: UploadedFile):
+    expires_at = item.recycled_at + timedelta(days=RECYCLE_BIN_EXPIRE_DAYS) if item.recycled_at else None
+    remaining_days = None
+    if expires_at:
+        remaining_days = max(0, (expires_at.date() - timezone.now().date()).days)
+
     return {
         "id": item.id,
         "display_name": item.display_name,
@@ -116,6 +133,12 @@ def file_item_payload(item: UploadedFile):
         "url": "" if item.is_dir or not item.relative_path else media_url(item.relative_path),
         "created_at": item.created_at,
         "updated_at": item.updated_at,
+        "is_system": item.is_system,
+        "is_recycle_bin": is_recycle_bin_folder(item),
+        "recycled_at": item.recycled_at,
+        "expires_at": expires_at,
+        "remaining_days": remaining_days,
+        "recycle_original_parent_id": item.recycle_original_parent_id,
     }
 
 
@@ -123,6 +146,8 @@ class FileEntriesAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        get_user_upload_root(request.user)
+
         parent_id = parse_parent_id(request.query_params.get("parent_id"))
         parent = get_parent_dir(request.user, parent_id)
         if parent_id is not None and parent is None:
@@ -143,7 +168,7 @@ class FileEntriesAPIView(APIView):
 
         return Response(
             {
-                "parent": None if not parent else {"id": parent.id, "display_name": parent.display_name},
+                "parent": None if not parent else file_item_payload(parent),
                 "breadcrumbs": breadcrumbs,
                 "items": items,
             }
@@ -220,6 +245,8 @@ class CreateFolderAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        get_user_upload_root(request.user)
+
         parent_id = parse_parent_id(request.data.get("parent_id"))
         parent = get_parent_dir(request.user, parent_id)
         if parent_id is not None and parent is None:
@@ -249,8 +276,15 @@ class DeleteFileEntryAPIView(APIView):
         entry = UploadedFile.objects.filter(id=entry_id, created_by=request.user).first()
         if not entry:
             return Response({"detail": "文件或目录不存在"}, status=status.HTTP_404_NOT_FOUND)
-        entry.delete()
-        return Response({"detail": "删除成功"})
+        if is_recycle_bin_folder(entry):
+            return Response({"detail": "回收站目录不可删除"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if entry.recycled_at is not None:
+            result = clear_recycle_bin(request.user, entry_ids=[entry.id])
+            return Response({"detail": "已彻底删除", **result})
+
+        moved_count = move_entry_to_recycle_bin(entry)
+        return Response({"detail": "已移入回收站", "moved_count": moved_count})
 
 
 class RenameFileEntryAPIView(APIView):
@@ -267,6 +301,8 @@ class RenameFileEntryAPIView(APIView):
         entry = UploadedFile.objects.filter(id=entry_id, created_by=request.user).first()
         if not entry:
             return Response({"detail": "文件或目录不存在"}, status=status.HTTP_404_NOT_FOUND)
+        if is_recycle_bin_folder(entry):
+            return Response({"detail": "回收站目录不可重命名"}, status=status.HTTP_400_BAD_REQUEST)
 
         conflict = UploadedFile.objects.filter(
             created_by=request.user,
@@ -279,6 +315,52 @@ class RenameFileEntryAPIView(APIView):
         entry.display_name = new_name
         entry.save(update_fields=["display_name", "updated_at"])
         return Response(file_item_payload(entry))
+
+
+class RecycleBinEntriesAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({"items": list_recycle_bin_entries(request.user)})
+
+
+class RestoreRecycleBinEntryAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        entry_id = parse_parent_id(request.data.get("id"))
+        if entry_id is None:
+            return Response({"detail": "参数不合法"}, status=status.HTTP_400_BAD_REQUEST)
+
+        entry = UploadedFile.objects.filter(id=entry_id, created_by=request.user).first()
+        if not entry:
+            return Response({"detail": "文件或目录不存在"}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            restored = restore_entry_from_recycle_bin(entry)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"detail": "已从回收站还原", "item": file_item_payload(restored)})
+
+
+class ClearRecycleBinAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        raw_ids = request.data.get("ids")
+        entry_ids: list[int] | None = None
+        if isinstance(raw_ids, list):
+            parsed_ids = [parse_parent_id(item) for item in raw_ids]
+            entry_ids = [item for item in parsed_ids if item is not None]
+
+        result = clear_recycle_bin(request.user, entry_ids=entry_ids)
+        return Response(
+            {
+                "detail": "回收站已清空",
+                **result,
+            }
+        )
 
 
 class UploadSmallFileAPIView(APIView):
@@ -562,6 +644,21 @@ class UploadMergeAPIView(APIView):
                     "missing_chunks": missing_chunks,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            inspector = celery_app.control.inspect(timeout=1)
+            online_workers = inspector.ping() or {}
+        except Exception:
+            online_workers = {}
+
+        if not online_workers:
+            return Response(
+                {
+                    "detail": "后台合并服务不可用（未检测到 Celery Worker）",
+                    "hint": "请先启动 Celery Worker：celery -A bbot_server worker -l info",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
         task = merge_large_file_task.delay(

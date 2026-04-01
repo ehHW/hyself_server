@@ -7,6 +7,16 @@ from utils.soft_delete import SoftDeleteModel
 
 class UploadedFile(SoftDeleteModel):
 	business = models.CharField(max_length=64, blank=True, default="", verbose_name="业务分类(兼容字段)")
+	is_system = models.BooleanField(default=False, db_index=True, verbose_name="是否系统内置")
+	recycled_at = models.DateTimeField(null=True, blank=True, default=None, db_index=True, verbose_name="移入回收站时间")
+	recycle_original_parent = models.ForeignKey(
+		"self",
+		null=True,
+		blank=True,
+		on_delete=models.SET_NULL,
+		related_name="recycle_restorables",
+		verbose_name="回收站原父目录",
+	)
 	stored_name = models.CharField(max_length=255, blank=True, default="", verbose_name="存储文件名")
 	display_name = models.CharField(max_length=255, blank=True, default="", verbose_name="展示文件名")
 	file_md5 = models.CharField(max_length=32, blank=True, default="", db_index=True, verbose_name="文件MD5")

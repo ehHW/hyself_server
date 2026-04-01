@@ -51,6 +51,7 @@ def merge_large_file_task(
 ):
     task_id = self.request.id
     temp_dir = get_temp_root() / f"{user_id}_{file_md5}"
+    output_path: Path | None = None
 
     try:
         _send_progress(task_id, {"status": "started", "progress": 0, "message": "开始合并分片"})
@@ -142,12 +143,18 @@ def merge_large_file_task(
         _send_progress(task_id, result_payload)
         return result_payload
     except Exception as exc:
+        if output_path is not None:
+            output_path.unlink(missing_ok=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        failed_payload = {
+            "status": "failed",
+            "progress": 100,
+            "message": str(exc),
+            "file_md5": file_md5,
+        }
         _send_progress(
             task_id,
-            {
-                "status": "failed",
-                "progress": 100,
-                "message": str(exc),
-            },
+            failed_payload,
         )
-        raise
+        return failed_payload
