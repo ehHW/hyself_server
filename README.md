@@ -1,6 +1,16 @@
 # bbot_server 后端
 
-基于 Django + DRF + Channels + JWT 的服务端，提供认证鉴权、用户/角色/权限管理、文件管理与上传相关接口。
+基于 Django + DRF + Channels + JWT 的服务端，当前对应 V1 已完成版本。
+
+项目当前覆盖以下核心业务：
+
+- 认证鉴权与权限控制
+- 用户 / 角色 / 权限管理
+- 资源中心文件管理与上传
+- 回收站与去重恢复
+- 聊天室 V1
+- WebSocket 实时事件
+- Celery 异步上传合并与相关任务支撑
 
 ## 技术栈
 
@@ -14,7 +24,7 @@
 
 ## 运行环境
 
-- Python: `>=3.14`（以 `pyproject.toml` 为准）
+- Python: >=3.14
 - MySQL: 建议 8.x
 - Redis: 建议 6.x 及以上
 
@@ -42,7 +52,7 @@ uv sync
 
 ## 环境变量
 
-项目通过 `.env` 加载配置。常用变量如下：
+项目通过 .env 加载配置。常用变量如下：
 
 ```env
 DEBUG=True
@@ -54,7 +64,6 @@ DATABASE_NAME=bbot_server
 DATABASE_USER=root
 DATABASE_PASSWORD=your_password
 
-# 可选
 ALLOWED_HOSTS=127.0.0.1,localhost,testserver
 CORS_ALLOW_ALL_ORIGINS=True
 CORS_ALLOW_CREDENTIALS=False
@@ -84,65 +93,142 @@ python manage.py createsuperuser
 python manage.py runserver 127.0.0.1:8000
 ```
 
-### 方式二：ASGI（推荐用于 websocket 调试）
+说明：仅调普通 REST 接口时可用，但如果要完整验证聊天室实时推送，建议使用 ASGI 方式。
+
+### 方式二：ASGI
 
 ```bash
 uvicorn bbot_server.asgi:application --host 127.0.0.1 --port 8000 --reload --lifespan off
 ```
 
-## Celery（可选）
+当前 WebSocket 入口：
 
-如果你使用了异步任务，另开终端启动 worker：
+- /ws/global/
+
+前端会通过 access token 建立全局连接，用于消息推送、未读同步、好友申请和群通知等事件。
+
+## Celery
+
+如果你需要大文件分片合并或其他异步任务，另开终端启动 worker：
 
 ```bash
-celery -A bbot_server worker -l info
 celery -A bbot_server worker -l info --pool=solo -c 1
 ```
 
-Windows 推荐（避免 billiard 权限问题）：
+Windows 推荐固定使用上面的 solo 模式，避免 billiard 相关兼容问题。
 
-```bash
-celery -A bbot_server worker -l info --pool=solo -c 1
-```
+## 定时任务
 
-## 定时任务（Cron Jobs）
+项目级定时任务统一放在 bbot_server/cron_jobs/。
 
-项目级定时任务统一放在 `bbot_server/cron_jobs/`。
-
-已提供回收站清理任务：
+当前已提供回收站清理命令：
 
 ```bash
 python manage.py cleanup_recycle_bin
 ```
 
-建议每天凌晨执行一次。
+建议每天定时执行一次。
 
-Linux crontab 示例（每天 00:00）：
+## 当前 V1 模块说明
 
-```bash
-0 0 * * * cd /path/to/bbot_server && /path/to/python manage.py cleanup_recycle_bin
-```
+### 认证与权限
 
-## 接口路由（简要）
+- JWT 登录、刷新、用户信息获取
+- 用户、角色、权限三套管理接口
+- 基于权限码的菜单与接口访问控制
 
-- `/api/auth/*`：登录、刷新、用户信息
-- `/api/users|roles|permissions`：用户角色权限管理
-- `/api/upload/*`：文件列表、上传、分片、合并、重命名、删除
-- `/uploads/*`：媒体文件访问（DEBUG 模式）
+### 资源中心
 
-## 目录结构（简要）
+- 文件树与目录浏览
+- 文件搜索
+- 新建文件夹、重命名、软删除
+- 回收站浏览、恢复、彻底删除、清空
+- 小文件直传
+- 大文件分片上传、续传、合并
+- 基于 MD5 的重复文件识别
+- 回收站同 MD5 文件恢复到用户当前选定目录
+
+### 聊天室 V1
+
+- 单聊与群聊会话
+- 好友申请、好友列表、好友备注
+- 群创建、邀请、退群、成员管理
+- 文本消息历史查询
+- 未读数更新与已读同步
+- 会话隐藏、置顶、个人会话偏好
+- 聊天搜索
+- 管理员聊天巡检接口
+
+## 主要 REST 路由
+
+### 用户与认证
+
+- /api/auth/*
+- /api/users/*
+- /api/roles/*
+- /api/permissions/*
+
+### 资源中心
+
+- /api/upload/files/
+- /api/upload/search/
+- /api/upload/recycle-bin/
+- /api/upload/recycle-bin/restore/
+- /api/upload/recycle-bin/clear/
+- /api/upload/folders/
+- /api/upload/delete/
+- /api/upload/rename/
+- /api/upload/small/
+- /api/upload/precheck/
+- /api/upload/chunk/
+- /api/upload/chunks/
+- /api/upload/merge/
+
+### 聊天模块
+
+- /api/chat/friends/*
+- /api/chat/conversations/*
+- /api/chat/group-join-requests/*
+- /api/chat/search/
+- /api/chat/settings/
+- /api/chat/admin/conversations/
+- /api/chat/admin/messages/
+
+### 其他
+
+- /api/game/*
+- /uploads/* 仅在 DEBUG 模式下由 Django 直接提供媒体访问
+
+## 目录结构
 
 ```text
 bbot_server/
   bbot_server/     # 项目配置（settings、urls、asgi、celery）
-  user/            # 用户/角色/权限与认证
-  bbot/            # 文件管理与上传业务
+  bbot/            # 资源中心、文件上传、回收站
+  chat/            # 聊天模块
+  game/            # 游戏相关接口
+  user/            # 用户、角色、权限、认证
+  utils/           # 通用工具
+  ws/              # WebSocket 鉴权、路由、事件、消费者
+  docs/            # 设计文档与 V1 方案文档
   manage.py
 ```
 
 ## 联调建议
 
 1. 确保 MySQL、Redis 已启动。
-2. 完成 `.env` 配置并执行迁移。
-3. 启动后端服务（8000 端口）。
-4. 再启动前端进行联调。
+2. 完成 .env 配置并执行迁移。
+3. 使用 uvicorn 启动 ASGI 服务，便于同时验证 REST 和 WebSocket。
+4. 如需测试大文件上传，额外启动 Celery worker。
+5. 再启动前端进行联调。
+
+## 相关文档
+
+- docs/chat_v1_plan.md
+- docs/chat_v1_api_design.md
+- docs/chat_v1_schema_design.md
+
+## 备注
+
+- 当前聊天室 V1 仅支持文本消息，不包含图片、文件消息发送。
+- 回收站去重恢复逻辑会优先尝试复用同 MD5 文件，并将恢复目标落到用户当前所选目录。
