@@ -119,6 +119,7 @@ class ChatGroupConfig(SoftDeleteModel):
 class ChatGroupJoinRequest(TimestampedModel):
     class RequestType(models.TextChoices):
         INVITE = "invite", "邀请"
+        APPLICATION = "application", "申请"
 
     class Status(models.TextChoices):
         PENDING = "pending", "待处理"

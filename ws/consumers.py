@@ -7,7 +7,9 @@ from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from bbot_server.celery import app as celery_app
-from chat.services import prepare_mark_read, prepare_send_text_message, prepare_typing_payload
+from chat.application.commands.realtime import execute_mark_conversation_read_command, execute_send_text_message_command
+from chat.application.queries.realtime import execute_chat_typing_query
+from ws.events import build_ws_event
 
 
 class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
@@ -46,14 +48,56 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
             },
         )
 
+    async def _broadcast_chat_message(self, *, user_id: int, client_message_id: str | None, payload: dict):
+        await self._send_user_payload(
+            user_id,
+            build_ws_event(
+                "chat.message.ack",
+                {
+                    "conversation_id": payload["conversation_id"],
+                    "client_message_id": client_message_id,
+                    "message": payload["message"],
+                    "conversation": payload["sender_conversation"],
+                },
+            ),
+        )
+
+        for recipient in payload["recipients"]:
+            await self._send_user_payload(
+                recipient["user_id"],
+                build_ws_event(
+                    "chat.message.created",
+                    {
+                        "conversation_id": payload["conversation_id"],
+                        "message": payload["message"],
+                    },
+                ),
+            )
+            await self._send_user_payload(
+                recipient["user_id"],
+                build_ws_event("chat.conversation.updated", {"conversation": recipient["conversation"]}),
+            )
+            await self._send_user_payload(
+                recipient["user_id"],
+                build_ws_event(
+                    "chat.unread.updated",
+                    {
+                        "conversation_id": payload["conversation_id"],
+                        "unread_count": recipient["unread_count"],
+                        "total_unread_count": recipient["total_unread_count"],
+                    },
+                ),
+            )
+
     async def _handle_chat_send_message(self, content: dict):
         conversation_id = content.get("conversation_id")
         try:
-            payload = await database_sync_to_async(prepare_send_text_message)(
+            payload = await database_sync_to_async(execute_send_text_message_command)(
                 self.scope["user"],
                 int(conversation_id),
                 content=str(content.get("content", "")),
                 client_message_id=str(content.get("client_message_id", "")).strip() or None,
+                quoted_message_id=int(content.get("quoted_message_id")) if content.get("quoted_message_id") else None,
             )
         except (TypeError, ValueError):
             await self.send_json({"type": "error", "message": "conversation_id 非法", "event": "chat_send_message"})
@@ -65,48 +109,45 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"type": "error", "message": str(exc), "event": "chat_send_message"})
             return
 
-        await self._send_user_payload(
-            self.scope["user"].id,
-            {
-                "type": "chat_message_ack",
-                "conversation_id": payload["conversation_id"],
-                "client_message_id": str(content.get("client_message_id", "")).strip() or None,
-                "message": payload["message"],
-                "conversation": payload["sender_conversation"],
-            },
+        await self._broadcast_chat_message(
+            user_id=self.scope["user"].id,
+            client_message_id=str(content.get("client_message_id", "")).strip() or None,
+            payload=payload,
         )
 
-        for recipient in payload["recipients"]:
-            await self._send_user_payload(
-                recipient["user_id"],
-                {
-                    "type": "chat_new_message",
-                    "conversation_id": payload["conversation_id"],
-                    "message": payload["message"],
-                },
+    async def _handle_chat_send_asset_message(self, content: dict):
+        from chat.application.commands.attachments import execute_send_asset_message_command
+
+        conversation_id = content.get("conversation_id")
+        try:
+            payload = await database_sync_to_async(execute_send_asset_message_command)(
+                self.scope["user"],
+                int(conversation_id),
+                source_asset_reference_id=int(content.get("asset_reference_id")),
+                quoted_message_id=int(content.get("quoted_message_id")) if content.get("quoted_message_id") else None,
+                emit_events=False,
             )
-            await self._send_user_payload(
-                recipient["user_id"],
-                {
-                    "type": "chat_conversation_updated",
-                    "conversation": recipient["conversation"],
-                },
-            )
-            await self._send_user_payload(
-                recipient["user_id"],
-                {
-                    "type": "chat_unread_updated",
-                    "conversation_id": payload["conversation_id"],
-                    "unread_count": recipient["unread_count"],
-                    "total_unread_count": recipient["total_unread_count"],
-                },
-            )
+        except (TypeError, ValueError):
+            await self.send_json({"type": "error", "message": "会话或资产引用非法", "event": "chat_send_asset_message"})
+            return
+        except ValidationError as exc:
+            await self.send_json({"type": "error", "message": self._normalize_error(exc), "event": "chat_send_asset_message"})
+            return
+        except PermissionDenied as exc:
+            await self.send_json({"type": "error", "message": str(exc), "event": "chat_send_asset_message"})
+            return
+
+        await self._broadcast_chat_message(
+            user_id=self.scope["user"].id,
+            client_message_id=str(content.get("client_message_id", "")).strip() or None,
+            payload=payload,
+        )
 
     async def _handle_chat_mark_read(self, content: dict):
         conversation_id = content.get("conversation_id")
         last_read_sequence = content.get("last_read_sequence")
         try:
-            payload = await database_sync_to_async(prepare_mark_read)(
+            payload = await database_sync_to_async(execute_mark_conversation_read_command)(
                 self.scope["user"],
                 int(conversation_id),
                 last_read_sequence=int(last_read_sequence),
@@ -123,19 +164,21 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
 
         await self._send_user_payload(
             self.scope["user"].id,
-            {
-                "type": "chat_unread_updated",
-                "conversation_id": payload["conversation_id"],
-                "unread_count": payload["unread_count"],
-                "total_unread_count": payload["total_unread_count"],
-                "last_read_sequence": payload["last_read_sequence"],
-            },
+            build_ws_event(
+                "chat.unread.updated",
+                {
+                    "conversation_id": payload["conversation_id"],
+                    "unread_count": payload["unread_count"],
+                    "total_unread_count": payload["total_unread_count"],
+                    "last_read_sequence": payload["last_read_sequence"],
+                },
+            ),
         )
 
     async def _handle_chat_typing(self, content: dict):
         conversation_id = content.get("conversation_id")
         try:
-            payload = await database_sync_to_async(prepare_typing_payload)(
+            payload = await database_sync_to_async(execute_chat_typing_query)(
                 self.scope["user"],
                 int(conversation_id),
                 is_typing=bool(content.get("is_typing", False)),
@@ -153,12 +196,14 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
         for user_id in payload["target_user_ids"]:
             await self._send_user_payload(
                 user_id,
-                {
-                    "type": "chat_typing",
-                    "conversation_id": payload["conversation_id"],
-                    "user": payload["user"],
-                    "is_typing": payload["is_typing"],
-                },
+                build_ws_event(
+                    "chat.typing.updated",
+                    {
+                        "conversation_id": payload["conversation_id"],
+                        "user": payload["user"],
+                        "is_typing": payload["is_typing"],
+                    },
+                ),
             )
 
     @staticmethod
@@ -192,6 +237,10 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
 
         if message_type == "chat_send_message":
             await self._handle_chat_send_message(content)
+            return
+
+        if message_type == "chat_send_asset_message":
+            await self._handle_chat_send_asset_message(content)
             return
 
         if message_type == "chat_mark_read":

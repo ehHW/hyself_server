@@ -137,7 +137,7 @@ python manage.py cleanup_recycle_bin
 - 用户、角色、权限三套管理接口
 - 基于权限码的菜单与接口访问控制
 
-### 资源中心
+### 资源中心接口
 
 - 文件树与目录浏览
 - 文件搜索
@@ -224,9 +224,12 @@ bbot_server/
 
 ## 相关文档
 
-- docs/chat_v1_plan.md
-- docs/chat_v1_api_design.md
-- docs/chat_v1_schema_design.md
+- docs/V1/chat_v1_plan.md
+- docs/V1/chat_v1_api_design.md
+- docs/V1/chat_v1_schema_design.md
+- docs/V2/v2_architecture.md
+- docs/V2/chat_v2_refactor_plan.md
+- docs/V2/assets_v2_design.md
 
 ## 备注
 

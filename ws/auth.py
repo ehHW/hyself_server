@@ -3,21 +3,15 @@ WebSocket 认证中间件
 """
 from urllib.parse import parse_qs
 
+from auth.jwt import get_user_from_jwt_token
 from channels.db import database_sync_to_async
 from channels.middleware import BaseMiddleware
-from django.contrib.auth import get_user_model
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from rest_framework_simplejwt.tokens import UntypedToken
 
 
 @database_sync_to_async
-def get_user(user_id):
-    """从数据库中获取用户对象"""
-    User = get_user_model()
-    try:
-        return User.objects.get(id=user_id)
-    except User.DoesNotExist:
-        return None
+def get_user(token: str):
+    """根据 JWT token 解析当前用户。"""
+    return get_user_from_jwt_token(token)
 
 
 class JwtAuthMiddleware(BaseMiddleware):
@@ -30,12 +24,6 @@ class JwtAuthMiddleware(BaseMiddleware):
 
         scope["user"] = None
         if token:
-            try:
-                validated = UntypedToken(token)
-                user_id = validated.payload.get("user_id")
-                if user_id is not None:
-                    scope["user"] = await get_user(user_id)
-            except (InvalidToken, TokenError):
-                scope["user"] = None
+            scope["user"] = await get_user(token)
 
         return await super().__call__(scope, receive, send)

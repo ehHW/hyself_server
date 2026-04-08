@@ -1,3 +1,4 @@
+from auth.permissions import AuthenticatedPermission, SuperAdminPermission
 from rest_framework.permissions import BasePermission
 
 
@@ -18,6 +19,5 @@ class ActionPermission(BasePermission):
         return request.user.has_permission_code(perm_code)
 
 
-class SuperAdminOnly(BasePermission):
-    def has_permission(self, request, view) -> bool:
-        return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
+class SuperAdminOnly(SuperAdminPermission):
+    pass

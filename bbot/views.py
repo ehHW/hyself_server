@@ -2,16 +2,22 @@ from datetime import timedelta
 from pathlib import Path
 import shutil
 
+from auth.permissions import AuthenticatedPermission as IsAuthenticated
 from django.http import JsonResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from bbot.models import UploadedFile
+from bbot.asset_compat import (
+    create_user_profile_asset_reference,
+    ensure_asset_compat_for_uploaded_file,
+    serialize_asset_payload,
+    serialize_asset_reference_payload,
+)
+from bbot.models import AssetReference, UploadedFile
 from bbot.recycle_bin import (
     RECYCLE_BIN_DISPLAY_NAME,
     RECYCLE_BIN_EXPIRE_DAYS,
@@ -254,12 +260,21 @@ def resolve_existing_upload_file(
         ).order_by("-recycled_at", "-id").first()
 
     if not existing:
+        existing = UploadedFile.objects.filter(
+            file_md5=file_md5,
+            is_dir=False,
+            deleted_at__isnull=True,
+            recycled_at__isnull=True,
+        ).exclude(created_by=user).exclude(relative_path="").order_by("-updated_at", "-id").first()
+
+    if not existing:
         return None, False
 
     return materialize_existing_upload_file(user, existing, target_parent, display_name)
 
 
 def file_item_payload(item: UploadedFile):
+    asset, asset_reference = ensure_asset_compat_for_uploaded_file(item)
     expires_at = item.recycled_at + timedelta(days=RECYCLE_BIN_EXPIRE_DAYS) if item.recycled_at else None
     remaining_days = None
     if expires_at:
@@ -283,6 +298,55 @@ def file_item_payload(item: UploadedFile):
         "expires_at": expires_at,
         "remaining_days": remaining_days,
         "recycle_original_parent_id": item.recycle_original_parent_id,
+        "asset_reference_id": asset_reference.id,
+        "asset_reference": serialize_asset_reference_payload(asset_reference),
+        "asset": serialize_asset_payload(asset),
+    }
+
+
+def ensure_asset_refs_for_entries(entries: list[UploadedFile]) -> None:
+    for entry in entries:
+        if getattr(entry, "asset_reference_compat", None) is None:
+            ensure_asset_compat_for_uploaded_file(entry)
+
+
+def file_reference_payload(reference: AssetReference):
+    legacy_item = reference.legacy_uploaded_file
+    is_dir = reference.ref_type == AssetReference.RefType.DIRECTORY
+    expires_at = reference.recycled_at + timedelta(days=RECYCLE_BIN_EXPIRE_DAYS) if reference.recycled_at else None
+    remaining_days = None
+    if expires_at:
+        remaining_days = max(0, (expires_at.date() - timezone.now().date()).days)
+
+    relative_path = reference.relative_path_cache or (legacy_item.relative_path if legacy_item else "")
+    display_name = reference.display_name or (legacy_item.display_name if legacy_item else "")
+    parent_id = None
+    if legacy_item is not None:
+        parent_id = legacy_item.parent_id
+    elif reference.parent_reference is not None:
+        parent_id = reference.parent_reference.legacy_uploaded_file_id or reference.parent_reference_id
+
+    return {
+        "id": legacy_item.id if legacy_item is not None else reference.id,
+        "display_name": display_name,
+        "stored_name": legacy_item.stored_name if legacy_item is not None else Path(relative_path).name,
+        "is_dir": is_dir,
+        "parent_id": parent_id,
+        "file_size": reference.asset.file_size if reference.asset is not None else (legacy_item.file_size if legacy_item is not None else 0),
+        "file_md5": reference.asset.file_md5 or "" if reference.asset is not None else (legacy_item.file_md5 if legacy_item is not None else ""),
+        "relative_path": relative_path,
+        "url": "" if is_dir or not relative_path else (serialize_asset_payload(reference.asset) or {}).get("url", media_url(relative_path)),
+        "created_at": legacy_item.created_at if legacy_item is not None else reference.created_at,
+        "updated_at": legacy_item.updated_at if legacy_item is not None else reference.updated_at,
+        "is_system": legacy_item.is_system if legacy_item is not None else reference.visibility == AssetReference.Visibility.SYSTEM,
+        "is_recycle_bin": bool(legacy_item and is_recycle_bin_folder(legacy_item)),
+        "recycled_at": reference.recycled_at,
+        "expires_at": expires_at,
+        "remaining_days": remaining_days,
+        "recycle_original_parent_id": legacy_item.recycle_original_parent_id if legacy_item is not None else None,
+        "asset_reference_id": reference.id,
+        "asset_reference": serialize_asset_reference_payload(reference),
+        "asset": serialize_asset_payload(reference.asset),
     }
 
 
@@ -297,22 +361,42 @@ class FileEntriesAPIView(APIView):
         if parent_id is not None and parent is None:
             return Response({"detail": "目录不存在"}, status=status.HTTP_404_NOT_FOUND)
 
-        query = UploadedFile.objects.filter(created_by=request.user, parent=parent).order_by("-is_dir", "display_name", "id")
-        items = [file_item_payload(item) for item in query]
+        orphan_entries = list(
+            UploadedFile.objects.filter(
+                created_by=request.user,
+                parent=parent,
+                deleted_at__isnull=True,
+                asset_reference_compat__isnull=True,
+            )
+        )
+        ensure_asset_refs_for_entries(orphan_entries)
+
+        parent_reference = None if parent is None else ensure_asset_compat_for_uploaded_file(parent)[1]
+        reference_items = list(
+            AssetReference.objects.select_related("asset", "legacy_uploaded_file", "parent_reference", "parent_reference__legacy_uploaded_file")
+            .filter(
+                owner_user=request.user,
+                ref_domain=AssetReference.RefDomain.RESOURCE_CENTER,
+                parent_reference=parent_reference,
+                deleted_at__isnull=True,
+            )
+        )
+        reference_items.sort(key=lambda item: (item.ref_type != AssetReference.RefType.DIRECTORY, item.display_name or "", item.id))
+        items = [file_reference_payload(item) for item in reference_items]
 
         breadcrumbs = [{"id": None, "name": "我的文件"}]
-        if parent:
-            chain: list[UploadedFile] = []
-            cursor = parent
+        if parent_reference:
+            chain: list[AssetReference] = []
+            cursor = parent_reference
             while cursor:
                 chain.append(cursor)
-                cursor = cursor.parent
+                cursor = cursor.parent_reference
             for node in reversed(chain):
-                breadcrumbs.append({"id": node.id, "name": node.display_name})
+                breadcrumbs.append({"id": node.legacy_uploaded_file_id or node.id, "name": node.display_name})
 
         return Response(
             {
-                "parent": None if not parent else file_item_payload(parent),
+                "parent": None if not parent_reference else file_reference_payload(parent_reference),
                 "breadcrumbs": breadcrumbs,
                 "items": items,
             }
@@ -333,19 +417,38 @@ class SearchFileEntriesAPIView(APIView):
             limit = 50
         limit = max(1, min(limit, 200))
 
-        matched_files = list(
+        orphan_entries = list(
             UploadedFile.objects.filter(
                 created_by=request.user,
                 is_dir=False,
                 display_name__icontains=keyword,
+                deleted_at__isnull=True,
+                asset_reference_compat__isnull=True,
+            )[:limit]
+        )
+        ensure_asset_refs_for_entries(orphan_entries)
+
+        matched_files = list(
+            AssetReference.objects.select_related("asset", "legacy_uploaded_file", "parent_reference", "parent_reference__legacy_uploaded_file")
+            .filter(
+                owner_user=request.user,
+                ref_domain=AssetReference.RefDomain.RESOURCE_CENTER,
+                ref_type__in=[AssetReference.RefType.FILE, AssetReference.RefType.AVATAR],
+                display_name__icontains=keyword,
+                deleted_at__isnull=True,
             )
             .order_by("display_name", "id")[:limit]
         )
 
-        all_dirs = UploadedFile.objects.filter(created_by=request.user, is_dir=True).values("id", "parent_id", "display_name")
+        all_dirs = AssetReference.objects.filter(
+            owner_user=request.user,
+            ref_domain=AssetReference.RefDomain.RESOURCE_CENTER,
+            ref_type=AssetReference.RefType.DIRECTORY,
+            deleted_at__isnull=True,
+        ).values("id", "parent_reference_id", "display_name")
         dir_map = {
             int(item["id"]): {
-                "parent_id": item["parent_id"],
+                "parent_id": item["parent_reference_id"],
                 "display_name": item["display_name"],
             }
             for item in all_dirs
@@ -375,8 +478,8 @@ class SearchFileEntriesAPIView(APIView):
 
         items = []
         for file_item in matched_files:
-            payload = file_item_payload(file_item)
-            directory_path = build_dir_path(file_item.parent_id)
+            payload = file_reference_payload(file_item)
+            directory_path = build_dir_path(file_item.parent_reference_id)
             full_path = f"{directory_path}/{file_item.display_name}" if directory_path else file_item.display_name
             payload["directory_path"] = directory_path
             payload["full_path"] = full_path
@@ -553,6 +656,12 @@ class UploadSmallFileAPIView(APIView):
 
             avatar_relative_path = relative_to_uploads(target_path)
             avatar_url = media_url(avatar_relative_path)
+            avatar_asset, avatar_reference = create_user_profile_asset_reference(
+                user=request.user,
+                display_name=display_name,
+                relative_path=avatar_relative_path,
+                file_size=int(file_obj.size),
+            )
             return Response(
                 {
                     "mode": "direct",
@@ -568,6 +677,15 @@ class UploadSmallFileAPIView(APIView):
                         "url": avatar_url,
                         "created_at": None,
                         "updated_at": None,
+                        "is_system": False,
+                        "is_recycle_bin": False,
+                        "recycled_at": None,
+                        "expires_at": None,
+                        "remaining_days": None,
+                        "recycle_original_parent_id": None,
+                        "asset_reference_id": avatar_reference.id,
+                        "asset_reference": serialize_asset_reference_payload(avatar_reference),
+                        "asset": serialize_asset_payload(avatar_asset),
                     },
                 }
             )
@@ -602,6 +720,7 @@ class UploadSmallFileAPIView(APIView):
             stored_name=stored_name,
             display_name=display_name,
         )
+        ensure_asset_compat_for_uploaded_file(file_record)
 
         return Response(
             {

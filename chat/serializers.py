@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
+from bbot.models import AssetReference
 from chat.models import ChatConversationMember, ChatGroupConfig
 from user.models import UserPreference
 
@@ -36,12 +37,17 @@ class InviteConversationMemberSerializer(serializers.Serializer):
     target_user_id = serializers.IntegerField(min_value=1)
 
 
+class ApplyGroupInvitationSerializer(serializers.Serializer):
+    conversation_id = serializers.IntegerField(min_value=1)
+    inviter_user_id = serializers.IntegerField(min_value=1)
+
+
 class UpdateConversationMemberRoleSerializer(serializers.Serializer):
     role = serializers.ChoiceField(choices=[ChatConversationMember.Role.ADMIN, ChatConversationMember.Role.MEMBER])
 
 
 class MuteConversationMemberSerializer(serializers.Serializer):
-    mute_minutes = serializers.IntegerField(min_value=1, max_value=60 * 24 * 30)
+    mute_minutes = serializers.IntegerField(min_value=0, max_value=60 * 24 * 30)
     reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
 
 
@@ -68,6 +74,20 @@ class ConversationPinSerializer(serializers.Serializer):
 class ConversationPreferenceSerializer(serializers.Serializer):
     mute_notifications = serializers.BooleanField(required=False)
     group_nickname = serializers.CharField(max_length=80, required=False, allow_blank=True)
+
+
+class AttachmentMessageCreateSerializer(serializers.Serializer):
+    asset_reference_id = serializers.IntegerField(min_value=1)
+
+    def validate_asset_reference_id(self, value):
+        if not AssetReference.objects.filter(id=value).exists():
+            raise serializers.ValidationError("资产引用不存在")
+        return value
+
+
+class ForwardMessagesSerializer(serializers.Serializer):
+    target_conversation_id = serializers.IntegerField(min_value=1)
+    message_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), allow_empty=False)
 
 
 class FriendSettingUpdateSerializer(serializers.Serializer):

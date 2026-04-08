@@ -5,6 +5,7 @@ from asgiref.sync import async_to_sync
 from celery import shared_task
 from channels.layers import get_channel_layer
 
+from bbot.asset_compat import ensure_asset_compat_for_uploaded_file
 from bbot.models import UploadedFile
 from utils.upload import (
     build_stored_name,
@@ -121,7 +122,7 @@ def merge_large_file_task(
                 ]
             )
         else:
-            UploadedFile.objects.create(
+            file_record = UploadedFile.objects.create(
                 stored_name=stored_name,
                 display_name=display_name or file_name,
                 file_md5=file_md5,
@@ -131,6 +132,7 @@ def merge_large_file_task(
                 parent=parent,
                 is_dir=False,
             )
+        _, asset_reference = ensure_asset_compat_for_uploaded_file(file_record)
 
         result_payload = {
             "status": "done",
@@ -139,6 +141,14 @@ def merge_large_file_task(
             "file_md5": file_md5,
             "relative_path": relative_path,
             "url": media_url(relative_path),
+            "asset_reference_id": asset_reference.id,
+            "file": {
+                "id": file_record.id,
+                "display_name": file_record.display_name,
+                "relative_path": file_record.relative_path,
+                "url": media_url(relative_path),
+                "asset_reference_id": asset_reference.id,
+            },
         }
         _send_progress(task_id, result_payload)
         return result_payload
