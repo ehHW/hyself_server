@@ -300,7 +300,123 @@ class ChatAttachmentMessageTests(TestCase):
 		forwarded_message = ChatMessage.objects.filter(conversation=target_conversation).exclude(id=source_message.id).get()
 		self.assertEqual(forwarded_message.content, "原始文本消息")
 		self.assertEqual(forwarded_message.sender_id, self.user.id)
-		self.assertEqual(forwarded_message.payload["forwarded_from_message"]["id"], source_message.id)
+		self.assertEqual(forwarded_message.payload, {})
+
+	def test_forward_messages_api_merged_mode_creates_chat_record_message(self):
+		target_conversation = ChatConversation.objects.create(
+			type=ChatConversation.Type.GROUP,
+			status=ChatConversation.Status.ACTIVE,
+			name="转发目标",
+			owner=self.user,
+		)
+		ChatConversationMember.objects.create(
+			conversation=target_conversation,
+			user=self.user,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.OWNER,
+			show_in_list=True,
+		)
+		ChatConversationMember.objects.create(
+			conversation=target_conversation,
+			user=self.friend,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.MEMBER,
+			show_in_list=True,
+		)
+		source_message_a = ChatMessage.objects.create(
+			conversation=self.conversation,
+			sequence=1,
+			sender=self.user,
+			message_type=ChatMessage.MessageType.TEXT,
+			content="第一条文本",
+		)
+		source_message_b = ChatMessage.objects.create(
+			conversation=self.conversation,
+			sequence=2,
+			sender=self.friend,
+			message_type=ChatMessage.MessageType.FILE,
+			content="report.pdf",
+			payload={
+				"display_name": "report.pdf",
+				"media_type": "file",
+				"url": "/uploads/report.pdf",
+			},
+		)
+
+		response = self.client.post(
+			"/api/chat/messages/forward/",
+			{
+				"target_conversation_id": target_conversation.id,
+				"message_ids": [source_message_a.id, source_message_b.id],
+				"forward_mode": "merged",
+			},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json()["forward_mode"], "merged")
+		merged_message = ChatMessage.objects.filter(conversation=target_conversation, message_type=ChatMessage.MessageType.CHAT_RECORD).get()
+		self.assertEqual(merged_message.content, "chat_sender和chat_receiver的聊天记录")
+		items = merged_message.payload["chat_record"]["items"]
+		self.assertEqual(len(items), 2)
+		self.assertEqual(items[0]["source_message_id"], source_message_a.id)
+		self.assertEqual(items[1]["message_type"], ChatMessage.MessageType.FILE)
+		self.assertEqual(items[1]["asset"]["display_name"], "report.pdf")
+
+	def test_forward_messages_api_can_forward_chat_record_message_separately(self):
+		target_conversation = ChatConversation.objects.create(
+			type=ChatConversation.Type.GROUP,
+			status=ChatConversation.Status.ACTIVE,
+			name="转发目标",
+			owner=self.user,
+		)
+		ChatConversationMember.objects.create(
+			conversation=target_conversation,
+			user=self.user,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.OWNER,
+			show_in_list=True,
+		)
+		source_message = ChatMessage.objects.create(
+			conversation=self.group_conversation,
+			sequence=1,
+			sender=self.user,
+			message_type=ChatMessage.MessageType.CHAT_RECORD,
+			content="群聊的聊天记录",
+			payload={
+				"chat_record": {
+					"version": 1,
+					"title": "群聊的聊天记录",
+					"footer_label": "聊天记录",
+					"items": [
+						{
+							"source_message_id": 100,
+							"sequence": 1,
+							"conversation_id": self.group_conversation.id,
+							"message_type": ChatMessage.MessageType.TEXT,
+							"sender_name": "chat_sender",
+							"sender_avatar": "",
+							"content": "历史文本",
+						},
+					],
+				},
+			},
+		)
+
+		response = self.client.post(
+			"/api/chat/messages/forward/",
+			{
+				"target_conversation_id": target_conversation.id,
+				"message_ids": [source_message.id],
+				"forward_mode": "separate",
+			},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 200)
+		forwarded_message = ChatMessage.objects.filter(conversation=target_conversation, message_type=ChatMessage.MessageType.CHAT_RECORD).exclude(id=source_message.id).get()
+		self.assertEqual(forwarded_message.sender_id, self.user.id)
+		self.assertEqual(forwarded_message.payload["chat_record"]["title"], "群聊的聊天记录")
 
 	def test_invite_member_api_sends_group_invitation_message(self):
 		response = self.client.post(

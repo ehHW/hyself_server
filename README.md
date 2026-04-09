@@ -140,6 +140,7 @@ python manage.py cleanup_recycle_bin
 ### 认证与权限
 
 - JWT 登录、刷新、用户信息获取
+- 当前登录用户资料更新与自助修改密码
 - 用户、角色、权限三套管理接口
 - 基于权限码的菜单与接口访问控制
 
@@ -160,6 +161,8 @@ python manage.py cleanup_recycle_bin
 - 好友申请、好友列表、好友备注
 - 群创建、邀请、退群、成员管理
 - 文本消息与附件消息
+- 多消息逐条转发与合并转发
+- chat_record 聊天记录消息类型
 - 文本 / 附件消息历史查询
 - 未读数更新与已读同步
 - 会话隐藏、置顶、个人会话偏好
@@ -175,6 +178,8 @@ python manage.py cleanup_recycle_bin
 - WebSocket 广播事件已收敛为标准化 envelope，便于前端统一消费
 - 附件消息发送已经接入 chat/application/commands/attachments.py
 - 自聊、自身会话、群权限与禁言等规则已补充回归测试
+- 转发链路已支持 forward_mode，统一编排逐条转发与合并转发
+- 合并转发已落为正式 chat_record 消息，并补充递归 payload 序列化与回归测试
 
 ## 主要 REST 路由
 
@@ -249,6 +254,8 @@ bbot_server/
 - docs/V2/v2_architecture.md
 - docs/V2/chat_v2_refactor_plan.md
 - docs/V2/assets_v2_design.md
+- docs/implementation_notes/README.md
+- docs/implementation_notes/chat_multi_forward_design.md
 
 ## 备注
 

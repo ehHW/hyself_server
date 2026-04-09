@@ -196,6 +196,7 @@ class ChatMessage(TimestampedModel):
         SYSTEM = "system", "系统"
         IMAGE = "image", "图片"
         FILE = "file", "文件"
+        CHAT_RECORD = "chat_record", "聊天记录"
 
     conversation = models.ForeignKey("chat.ChatConversation", on_delete=models.CASCADE, related_name="messages")
     sequence = models.BigIntegerField()

@@ -282,6 +282,7 @@ class MessageForwardAPIView(APIView):
                 request.user,
                 target_conversation_id=serializer.validated_data["target_conversation_id"],
                 message_ids=serializer.validated_data["message_ids"],
+                forward_mode=serializer.validated_data["forward_mode"],
             )
         except ValidationError as exc:
             return Response(getattr(exc, "detail", {"detail": "请求参数非法"}), status=status.HTTP_400_BAD_REQUEST)

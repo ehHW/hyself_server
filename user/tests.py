@@ -91,6 +91,48 @@ class RoleDeleteProtectionTests(APITestCase):
 		self.assertIsNotNone(Role.objects.filter(id=self.role_in_use.id).first())
 
 
+class ChangePasswordTests(APITestCase):
+	def setUp(self):
+		self.user = User.objects.create_user(username="profile_user", password="OldPass123!", email="profile@example.com")
+		self.url = reverse("change_password")
+
+	def test_user_can_change_password(self):
+		self.client.force_authenticate(user=self.user)
+
+		response = self.client.post(
+			self.url,
+			{
+				"current_password": "OldPass123!",
+				"new_password": "NewPass456!",
+				"confirm_password": "NewPass456!",
+			},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data.get("detail"), "密码修改成功")
+		self.user.refresh_from_db()
+		self.assertTrue(self.user.check_password("NewPass456!"))
+
+	def test_change_password_rejects_wrong_current_password(self):
+		self.client.force_authenticate(user=self.user)
+
+		response = self.client.post(
+			self.url,
+			{
+				"current_password": "WrongPass123!",
+				"new_password": "NewPass456!",
+				"confirm_password": "NewPass456!",
+			},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertEqual(response.data.get("current_password"), ["当前密码错误"])
+		self.user.refresh_from_db()
+		self.assertTrue(self.user.check_password("OldPass123!"))
+
+
 class CorePermissionOperationTests(APITestCase):
 	def setUp(self):
 		self.create_permission_perm, _ = Permission.objects.get_or_create(code="user.create_permission", defaults={"name": "创建权限"})

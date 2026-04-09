@@ -30,6 +30,8 @@ def _build_reply_payload(conversation: ChatConversation, quoted_message_id: int 
     preview = quoted_message.content or ""
     if quoted_message.message_type in {ChatMessage.MessageType.IMAGE, ChatMessage.MessageType.FILE}:
         preview = str((quoted_message.payload or {}).get("display_name") or quoted_message.content or "附件")
+    elif quoted_message.message_type == ChatMessage.MessageType.CHAT_RECORD:
+        preview = str(((quoted_message.payload or {}).get("chat_record") or {}).get("title") or quoted_message.content or "聊天记录")
     return {
         "id": quoted_message.id,
         "sequence": quoted_message.sequence,

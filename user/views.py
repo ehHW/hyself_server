@@ -11,6 +11,7 @@ from django.db.models import Q
 from user.models import Permission, Role, User, SUPER_ADMIN_ROLE_NAME
 from user.permissions import ActionPermission
 from user.serializers import (
+	ChangePasswordSerializer,
 	LoginSerializer,
 	PermissionSerializer,
 	ProfileSerializer,
@@ -129,6 +130,17 @@ def profile_view(request):
 		write_audit_log(request, "update", "success", detail="更新个人资料成功", target=request.user)
 		return Response(ProfileSerializer(request.user).data)
 	return Response(ProfileSerializer(request.user).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def change_password_view(request):
+	ensure_super_admin_role()
+	serializer = ChangePasswordSerializer(data=request.data, context={"request": request})
+	serializer.is_valid(raise_exception=True)
+	serializer.save()
+	write_audit_log(request, "update_password", "success", detail="修改密码成功", target=request.user)
+	return Response({"detail": "密码修改成功"})
 
 
 class UserViewSet(viewsets.ModelViewSet):

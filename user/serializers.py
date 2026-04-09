@@ -1,4 +1,4 @@
-from django.contrib.auth import authenticate
+from django.contrib.auth import authenticate, password_validation
 from django.conf import settings
 from rest_framework import serializers
 
@@ -190,6 +190,38 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             setattr(instance, key, value)
         instance.save(update_fields=[*validated_data.keys(), "updated_at"])
         return instance
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    new_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    confirm_password = serializers.CharField(write_only=True, trim_whitespace=False)
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        current_password = attrs.get("current_password", "")
+        new_password = attrs.get("new_password", "")
+        confirm_password = attrs.get("confirm_password", "")
+
+        if not user or not user.is_authenticated:
+            raise serializers.ValidationError("当前登录状态无效")
+        if not user.check_password(current_password):
+            raise serializers.ValidationError({"current_password": "当前密码错误"})
+        if new_password != confirm_password:
+            raise serializers.ValidationError({"confirm_password": "两次输入的新密码不一致"})
+        if current_password == new_password:
+            raise serializers.ValidationError({"new_password": "新密码不能与当前密码相同"})
+
+        password_validation.validate_password(new_password, user)
+        attrs["user"] = user
+        return attrs
+
+    def save(self, **kwargs):
+        user = self.validated_data["user"]
+        user.set_password(self.validated_data["new_password"])
+        user.save(update_fields=["password", "updated_at"])
+        return user
 
 
 class UserPreferenceSerializer(serializers.ModelSerializer):

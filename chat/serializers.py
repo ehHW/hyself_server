@@ -88,6 +88,7 @@ class AttachmentMessageCreateSerializer(serializers.Serializer):
 class ForwardMessagesSerializer(serializers.Serializer):
     target_conversation_id = serializers.IntegerField(min_value=1)
     message_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), allow_empty=False)
+    forward_mode = serializers.ChoiceField(choices=["separate", "merged"], required=False, default="separate")
 
 
 class FriendSettingUpdateSerializer(serializers.Serializer):
