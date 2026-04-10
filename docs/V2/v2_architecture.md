@@ -525,6 +525,18 @@ V2 将治理能力前置，尤其是聊天与资源中心。
 3. 后端 chat 应用层与领域层拆分
 4. WebSocket 标准事件 envelope 建立
 
+当前已落地：
+
+1. 前端已先完成 chat shell、转发流程、聊天记录弹窗的场景层 / 组件层抽离，目录开始向 `src/modules/chat-center/` 收敛
+2. 后端 chat HTTP 接口已物理迁移到 `chat/interfaces/api/`，并继续按 `endpoints/` 与场景化 serializer 模块拆分
+3. 后端聊天广播事件已收口到通用 `ws/event_bus.py` + `chat/infrastructure/event_bus.py`，不再直接散落依赖旧通知函数
+
+当前未完成：
+
+1. 前端 chat store 尚未完成全面拆分
+2. 后端 chat 的 application / domain / repository 仍有继续收口空间
+3. 前端对 envelope 的消费虽然已兼容，但还没有完全抽成统一实时层
+
 ### Phase 2：资产统一
 
 目标：把资源中心、头像上传、聊天文件统一到资产域。
@@ -534,6 +546,18 @@ V2 将治理能力前置，尤其是聊天与资源中心。
 1. 建立 Asset / AssetReference 模型
 2. 聊天文件消息接入资产域
 3. 上传入口统一为 asset picker
+
+当前已落地：
+
+1. 聊天附件发送创建 `AssetReference` 已统一收口到 application service
+2. 头像引用更新与资源中心引用同步已复用同一批 asset reference service
+3. `UploadedFile` 当前作为兼容层继续存在，但引用关系已经开始向 Asset / AssetReference 语义收敛
+
+当前未完成：
+
+1. 统一 asset picker 入口还未建立
+2. 上传初始化、分片、合并等接口尚未统一成资产域协议
+3. 存量 UploadedFile 的彻底目录视图化仍在后续阶段
 
 ### Phase 3：聊天能力升级
 
@@ -572,6 +596,12 @@ V2 架构完成的标志不是文档存在，而是达到以下结果：
 3. 文件上传与聊天文件消息共享统一资产抽象
 4. WebSocket 事件统一成标准 envelope
 5. 新增图片 / 文件消息时，不需要重写一轮资源中心或上传体系
+
+按当前代码状态，可确认的进度是：
+
+1. 第 2、3、4 条已经进入真实落地阶段，其中 chat 接口物理分层、资产引用服务收口、事件 envelope 广播骨架都已完成第一轮收敛
+2. 第 1 条仍未完成，前端只完成了场景层与局部模块化切分，store 还没有全部脱离单体结构
+3. 第 5 条只完成了一半，聊天文件消息已经复用资产抽象，但统一上传入口与完整媒体能力还未闭环
 
 ---
 

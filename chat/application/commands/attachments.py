@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
+from chat.application.commands.delivery import build_message_delivery_payloads, emit_message_delivery_events
+from chat.application.commands.message_payloads import build_asset_payload, build_reply_payload_from_message
+from bbot.application.services.asset_references import create_chat_attachment_asset_reference
 from bbot.models import Asset, AssetReference
 from chat.domain.access import get_conversation_access
 from chat.domain.friendships import get_active_friendship_between
-from chat.domain.messaging import create_message, get_total_unread_count
-from chat.domain.serialization import serialize_conversation, serialize_message
-from chat.models import ChatConversation, ChatConversationMember, ChatMessage
+from chat.domain.messaging import create_message
+from chat.infrastructure.repositories import get_active_conversation, get_asset_reference_with_asset, get_conversation_message, get_other_active_member
+from chat.models import ChatConversation, ChatMessage
 from utils.upload import media_url
-from ws.events import notify_chat_conversation_updated, notify_chat_new_message, notify_chat_unread_updated
 
 
 def _resolve_asset_message_type(media_type: str) -> str:
@@ -21,24 +23,10 @@ def _resolve_asset_message_type(media_type: str) -> str:
 def _build_reply_payload(conversation: ChatConversation, quoted_message_id: int | None) -> dict | None:
     if not quoted_message_id:
         return None
-    quoted_message = ChatMessage.objects.select_related("sender").filter(conversation=conversation, id=quoted_message_id).first()
+    quoted_message = get_conversation_message(conversation, quoted_message_id)
     if quoted_message is None:
         raise ValidationError({"quoted_message_id": "引用消息不存在"})
-    sender_name = "系统"
-    if quoted_message.sender is not None:
-        sender_name = quoted_message.sender.display_name or quoted_message.sender.username
-    preview = quoted_message.content or ""
-    if quoted_message.message_type in {ChatMessage.MessageType.IMAGE, ChatMessage.MessageType.FILE}:
-        preview = str((quoted_message.payload or {}).get("display_name") or quoted_message.content or "附件")
-    elif quoted_message.message_type == ChatMessage.MessageType.CHAT_RECORD:
-        preview = str(((quoted_message.payload or {}).get("chat_record") or {}).get("title") or quoted_message.content or "聊天记录")
-    return {
-        "id": quoted_message.id,
-        "sequence": quoted_message.sequence,
-        "message_type": quoted_message.message_type,
-        "sender_name": sender_name,
-        "content_preview": preview[:120],
-    }
+    return build_reply_payload_from_message(quoted_message)
 
 
 def execute_send_asset_message_command(
@@ -50,7 +38,7 @@ def execute_send_asset_message_command(
     extra_payload: dict | None = None,
     emit_events: bool = True,
 ) -> dict:
-    conversation = ChatConversation.objects.select_related("owner", "group_config").filter(id=conversation_id, status=ChatConversation.Status.ACTIVE).first()
+    conversation = get_active_conversation(conversation_id)
     if conversation is None:
         raise ValidationError({"detail": "会话不存在"})
 
@@ -59,18 +47,11 @@ def execute_send_asset_message_command(
         raise PermissionDenied("当前无权发送消息")
 
     if conversation.type == ChatConversation.Type.DIRECT:
-        peer_member = (
-            ChatConversationMember.objects.filter(
-                conversation=conversation,
-                status=ChatConversationMember.Status.ACTIVE,
-            )
-            .exclude(user_id=user.id)
-            .first()
-        )
+        peer_member = get_other_active_member(conversation, exclude_user_id=user.id)
         if peer_member is not None and get_active_friendship_between(user.id, peer_member.user_id) is None:
             raise PermissionDenied("你们还不是好友，当前私聊暂不支持发送附件")
 
-    source_reference = AssetReference.objects.select_related("asset").filter(id=source_asset_reference_id).first()
+    source_reference = get_asset_reference_with_asset(source_asset_reference_id)
     if source_reference is None or source_reference.asset is None:
         raise ValidationError({"asset_reference_id": "资产引用不存在或未绑定文件"})
     if source_reference.ref_type == AssetReference.RefType.DIRECTORY:
@@ -80,41 +61,22 @@ def execute_send_asset_message_command(
     if source_reference.owner_user_id and source_reference.owner_user_id != user.id:
         raise PermissionDenied("当前无权发送该资产")
 
-    chat_reference = AssetReference.objects.create(
-        asset=source_reference.asset,
+    chat_reference = create_chat_attachment_asset_reference(
+        source_reference=source_reference,
         owner_user=user,
-        ref_domain=AssetReference.RefDomain.CHAT,
-        ref_type=AssetReference.RefType.CHAT_ATTACHMENT,
-        ref_object_id=str(conversation.id),
-        display_name=source_reference.display_name or source_reference.asset.original_name,
-        relative_path_cache=source_reference.relative_path_cache or source_reference.asset.storage_key,
-        status=AssetReference.Status.ACTIVE,
-        visibility=AssetReference.Visibility.CONVERSATION,
-        extra_metadata={
-            "source_asset_reference_id": source_reference.id,
-            "source_ref_domain": source_reference.ref_domain,
-            "source_ref_type": source_reference.ref_type,
-        },
+        conversation_id=conversation.id,
     )
 
     if access.member is not None and not access.member.show_in_list:
         access.member.show_in_list = True
         access.member.save(update_fields=["show_in_list", "updated_at"])
 
-    asset = source_reference.asset
-    payload = {
-        "asset_reference_id": chat_reference.id,
-        "source_asset_reference_id": source_reference.id,
-        "display_name": chat_reference.display_name,
-        "media_type": asset.media_type,
-        "mime_type": asset.mime_type,
-        "file_size": asset.file_size,
-        "url": media_url(asset.storage_key) if asset.storage_key and asset.storage_backend == Asset.StorageBackend.LOCAL else "",
-    }
+    payload = build_asset_payload(chat_reference=chat_reference, source_reference=source_reference)
     payload.update(extra_payload or {})
     reply_payload = _build_reply_payload(conversation, quoted_message_id)
     if reply_payload is not None:
         payload["reply_to_message"] = reply_payload
+    asset = source_reference.asset
     message = create_message(
         conversation,
         user,
@@ -123,35 +85,20 @@ def execute_send_asset_message_command(
         payload=payload,
     )
 
-    conversation = ChatConversation.objects.select_related("owner", "group_config").get(pk=conversation.pk)
-    message_payload = serialize_message(message)
-    sender_conversation = serialize_conversation(conversation, user)
-    recipient_members = list(
-        ChatConversationMember.objects.select_related("user").filter(conversation=conversation, status=ChatConversationMember.Status.ACTIVE).exclude(user_id=user.id)
+    conversation, message_payload, sender_conversation, recipient_payloads = build_message_delivery_payloads(
+        conversation=conversation,
+        sender_user=user,
+        message=message,
     )
-    hidden_recipient_ids = [item.pk for item in recipient_members if not item.show_in_list]
-    if hidden_recipient_ids:
-        ChatConversationMember.objects.filter(pk__in=hidden_recipient_ids).update(show_in_list=True)
-
-    recipient_payloads = []
-    for recipient_member in recipient_members:
-        refreshed_member = ChatConversationMember.objects.get(pk=recipient_member.pk)
-        recipient_payloads.append(
-            {
-                "user_id": recipient_member.user_id,
-                "conversation": serialize_conversation(conversation, recipient_member.user),
-                "unread_count": refreshed_member.unread_count,
-                "total_unread_count": get_total_unread_count(recipient_member.user),
-            }
-        )
 
     if emit_events:
-        notify_chat_new_message(user.id, {"conversation_id": conversation.id, "message": message_payload})
-        notify_chat_conversation_updated(user.id, sender_conversation)
-        for recipient in recipient_payloads:
-            notify_chat_new_message(recipient["user_id"], {"conversation_id": conversation.id, "message": message_payload})
-            notify_chat_conversation_updated(recipient["user_id"], recipient["conversation"])
-            notify_chat_unread_updated(recipient["user_id"], conversation.id, recipient["unread_count"], recipient["total_unread_count"])
+        emit_message_delivery_events(
+            conversation=conversation,
+            sender_user=user,
+            message_payload=message_payload,
+            sender_conversation=sender_conversation,
+            recipient_payloads=recipient_payloads,
+        )
 
     return {
         "detail": "附件消息已发送",

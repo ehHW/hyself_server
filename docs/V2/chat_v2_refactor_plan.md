@@ -1,5 +1,22 @@
 # Chat V2 重构实施计划
 
+## 0.1 当前落地快照
+
+截至当前代码，Chat V2 已先完成一轮“边界收口”，但还没有结束全部结构拆分。
+
+已完成：
+
+1. 前端已抽出 `useChatShellScene`、转发流程 composable、聊天记录弹窗组件，`src/modules/chat-center/` 已开始承接 chat 页面场景逻辑
+2. 后端 chat HTTP 接口已迁入 `chat/interfaces/api/`，并继续拆成 `endpoints/` 与场景化 serializer 模块
+3. 后端应用命令已通过 `chat/infrastructure/event_bus.py` 发布核心聊天事件，底层广播统一落到 `ws/event_bus.py`
+4. 聊天附件消息已接入资产域 service，不再在命令里散落创建 `AssetReference`
+
+仍待完成：
+
+1. 前端 store 还没有按 conversation / message / friendship / group 等维度完成拆分
+2. 后端 application / domain / infrastructure 虽已收口，但 repository、query、规则边界还有继续细化空间
+3. 前端实时消费层还没有完全抽成独立 realtime store / scene
+
 ## 1. 文档目标
 
 本文件基于 v2_architecture.md，进一步拆解 chat 模块在 V2 的实际落地步骤。
@@ -86,6 +103,12 @@ Chat V2 需要解决四类问题：
 2. 场景层处理跨 store 协调
 3. store 只处理单一领域状态
 
+当前进度补充：
+
+1. `useChatShellScene` 已落地，并替代原先一部分页面层直接编排
+2. 会话工作区里的转发选择、合并转发、聊天记录查看逻辑已拆到独立 composable / 组件
+3. 其余 conversation list、contact、audit、settings 场景仍待继续收口
+
 ### 4.4 前端目录目标
 
 ```text
@@ -167,6 +190,13 @@ src/modules/chat-center/
 3. Redis 缓存
 4. 搜索适配器
 
+当前进度补充：
+
+1. `interfaces/api` 已物理落地，原顶层 `chat/views.py`、`chat/serializers.py` 已退化为兼容导出层
+2. REST 接口已按 friends / conversations / groups / search / settings / admin 场景拆到独立 endpoint 文件
+3. serializer 也已按 friends / conversations / groups / settings 场景拆分，并保留聚合导出作为兼容层
+4. 事件广播已收口到通用 event bus 与 chat 基础设施包装层，但 repository 与搜索适配器还未完全独立成基础设施目录
+
 ### 5.3 子域拆分
 
 chat/domain 下拆五个子域：
@@ -221,6 +251,11 @@ chat/domain 下拆五个子域：
 ```
 
 这类 `error` 响应不属于领域广播事件，不进入标准 envelope，而是作为连接级命令回执保留。
+
+当前落地边界补充：
+
+1. 事件构造与发布已不再主要从 `ws.events` 直接散落调用，而是通过 `ws/event_bus.py` 和 `chat/infrastructure/event_bus.py` 收口
+2. 这意味着 chat 域已经具备面向其它域复用的事件广播边界，但前端消费统一层仍有继续抽象空间
 
 ### 6.3 首批事件清单
 
@@ -336,6 +371,11 @@ V2 第一阶段尽量不改动会引发全量迁移风险的核心表结构。
 2. 后端 chat 具备 command/query 入口
 3. 原有 V1 功能回归通过
 
+当前状态：部分完成。
+
+1. 第 2、3 条已满足，且 chat 回归测试已持续通过
+2. 第 1 条仍未满足，目前只完成了页面场景层和局部模块抽离
+
 ### M2：事件统一完成
 
 验收标准：
@@ -345,6 +385,11 @@ V2 第一阶段尽量不改动会引发全量迁移风险的核心表结构。
 3. 输入命令失败场景继续返回显式 `error` 回执，前端可按 `event` 字段回滚发送态
 4. 实时消息、好友申请、群通知链路无回归
 
+当前状态：后端完成度高于前端。
+
+1. 第 2、3、4 条已基本满足，后端广播骨架已统一，chat 测试回归正常
+2. 第 1 条仍未完全满足，前端目前是兼容消费 envelope，而不是完全由统一 realtime 层承接
+
 ### M3：文件消息接入完成
 
 验收标准：
@@ -352,6 +397,12 @@ V2 第一阶段尽量不改动会引发全量迁移风险的核心表结构。
 1. 文件消息可发送
 2. 资源中心与聊天复用资产能力
 3. 同一文件不重复造轮子
+
+当前状态：第一阶段已达成。
+
+1. 聊天附件消息已可通过 asset reference 发送
+2. 资源中心、头像、聊天附件已开始共享同一批 asset reference application service
+3. 统一上传入口和更完整的媒体类型支持仍属于下一阶段
 
 ## 12. 风险与注意事项
 

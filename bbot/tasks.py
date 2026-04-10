@@ -7,6 +7,7 @@ from channels.layers import get_channel_layer
 
 from bbot.asset_compat import ensure_asset_compat_for_uploaded_file
 from bbot.models import UploadedFile
+from bbot.video_processing import ensure_video_asset_pipeline, mark_video_processing_status, transcode_video_to_hls
 from utils.upload import (
     build_stored_name,
     calc_file_md5,
@@ -49,6 +50,7 @@ def merge_large_file_task(
     file_size: int,
     user_id: int | None,
     parent_id: int | None,
+    business: str = "",
 ):
     task_id = self.request.id
     temp_dir = get_temp_root() / f"{user_id}_{file_md5}"
@@ -111,6 +113,7 @@ def merge_large_file_task(
             file_record.file_size = file_size
             file_record.relative_path = relative_path
             file_record.file_md5 = file_md5
+            file_record.business = business
             file_record.save(
                 update_fields=[
                     "stored_name",
@@ -118,6 +121,7 @@ def merge_large_file_task(
                     "file_size",
                     "relative_path",
                     "file_md5",
+                    "business",
                     "updated_at",
                 ]
             )
@@ -131,8 +135,10 @@ def merge_large_file_task(
                 created_by=upload_user,
                 parent=parent,
                 is_dir=False,
+                business=business,
             )
-        _, asset_reference = ensure_asset_compat_for_uploaded_file(file_record)
+        asset, asset_reference = ensure_asset_compat_for_uploaded_file(file_record)
+        ensure_video_asset_pipeline(asset)
 
         result_payload = {
             "status": "done",
@@ -168,3 +174,23 @@ def merge_large_file_task(
             failed_payload,
         )
         return failed_payload
+
+
+@shared_task(bind=True)
+def process_video_asset_task(self, asset_id: int):
+    asset = None
+    try:
+        from bbot.models import Asset as AssetModel
+
+        asset = AssetModel.objects.filter(id=asset_id, deleted_at__isnull=True).first()
+        if asset is None:
+            return {"status": "missing", "asset_id": asset_id}
+
+        mark_video_processing_status(asset, status="processing")
+        outputs = transcode_video_to_hls(asset)
+        mark_video_processing_status(asset, status="ready", extra=outputs)
+        return {"status": "ready", "asset_id": asset.id, **outputs}
+    except Exception as exc:
+        if asset is not None:
+            mark_video_processing_status(asset, status="failed", error=str(exc))
+        return {"status": "failed", "asset_id": asset_id, "error": str(exc)}

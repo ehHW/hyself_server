@@ -3,12 +3,13 @@ from __future__ import annotations
 from chat.domain.access import get_member
 from chat.domain.member_settings import get_member_preferences, update_member_preferences
 from chat.domain.serialization import serialize_conversation
+from chat.infrastructure.repositories import get_active_conversation
 from chat.models import ChatConversation
-from ws.events import notify_chat_conversation_updated
+from chat.infrastructure.event_bus import notify_chat_conversation_updated
 
 
 def execute_hide_conversation_command(current_user, conversation_id: int) -> dict:
-    conversation = ChatConversation.objects.filter(id=conversation_id, status=ChatConversation.Status.ACTIVE).first()
+    conversation = get_active_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
     member = get_member(conversation, current_user.id, active_only=True)
@@ -21,7 +22,7 @@ def execute_hide_conversation_command(current_user, conversation_id: int) -> dic
 
 
 def execute_update_conversation_preference_command(current_user, conversation_id: int, *, mute_notifications: bool | None = None, group_nickname: str | None = None) -> dict:
-    conversation = ChatConversation.objects.select_related("owner", "group_config").filter(id=conversation_id, status=ChatConversation.Status.ACTIVE).first()
+    conversation = get_active_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
     member = get_member(conversation, current_user.id, active_only=True)
@@ -34,7 +35,7 @@ def execute_update_conversation_preference_command(current_user, conversation_id
 
 
 def execute_toggle_conversation_pin_command(current_user, conversation_id: int, *, is_pinned: bool) -> dict:
-    conversation = ChatConversation.objects.select_related("owner", "group_config").filter(id=conversation_id, status=ChatConversation.Status.ACTIVE).first()
+    conversation = get_active_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
     member = get_member(conversation, current_user.id, active_only=True)

@@ -10,6 +10,14 @@ from bbot_server.celery import app as celery_app
 from chat.application.commands.realtime import execute_mark_conversation_read_command, execute_send_text_message_command
 from chat.application.queries.realtime import execute_chat_typing_query
 from ws.events import build_ws_event
+from ws.input_serializers import (
+    ChatMarkReadWsSerializer,
+    ChatSendAssetMessageWsSerializer,
+    ChatSendMessageWsSerializer,
+    ChatTypingWsSerializer,
+    EchoWsSerializer,
+    UploadTaskSubscriptionWsSerializer,
+)
 
 
 class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
@@ -89,77 +97,162 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
                 ),
             )
 
+    async def _validate_ws_payload(self, serializer_class, content: dict, *, event: str, invalid_message: str):
+        serializer = serializer_class(data=content)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except ValidationError as exc:
+            await self._send_error(
+                event=event,
+                message=invalid_message,
+                error_kind="schema",
+                error_code=f"ws.schema.{event}.invalid",
+                error_details=self._extract_error_details(exc),
+            )
+            return None
+        return serializer.validated_data
+
+    async def _send_error(self, *, event: str, message: str, error_kind: str, error_code: str, error_details=None):
+        payload = {
+            "type": "error",
+            "message": message,
+            "event": event,
+            "error_kind": error_kind,
+            "error_code": error_code,
+        }
+        if error_details not in (None, {}, []):
+            payload["error_details"] = error_details
+        await self.send_json(payload)
+
+    @staticmethod
+    def _extract_error_details(exc: ValidationError):
+        detail = getattr(exc, "detail", None)
+        if isinstance(detail, dict):
+            return {
+                str(key): [str(item) for item in value] if isinstance(value, (list, tuple)) else [str(value)]
+                for key, value in detail.items()
+            }
+        if isinstance(detail, (list, tuple)):
+            return {"detail": [str(item) for item in detail]}
+        if detail:
+            return {"detail": [str(detail)]}
+        return None
+
     async def _handle_chat_send_message(self, content: dict):
-        conversation_id = content.get("conversation_id")
+        validated_data = await self._validate_ws_payload(
+            ChatSendMessageWsSerializer,
+            content,
+            event="chat_send_message",
+            invalid_message="消息参数非法",
+        )
+        if validated_data is None:
+            return
         try:
             payload = await database_sync_to_async(execute_send_text_message_command)(
                 self.scope["user"],
-                int(conversation_id),
-                content=str(content.get("content", "")),
-                client_message_id=str(content.get("client_message_id", "")).strip() or None,
-                quoted_message_id=int(content.get("quoted_message_id")) if content.get("quoted_message_id") else None,
+                validated_data["conversation_id"],
+                content=validated_data.get("content", ""),
+                client_message_id=validated_data.get("client_message_id"),
+                quoted_message_id=validated_data.get("quoted_message_id"),
             )
-        except (TypeError, ValueError):
-            await self.send_json({"type": "error", "message": "conversation_id 非法", "event": "chat_send_message"})
-            return
         except ValidationError as exc:
-            await self.send_json({"type": "error", "message": self._normalize_error(exc), "event": "chat_send_message"})
+            await self._send_error(
+                event="chat_send_message",
+                message=self._normalize_error(exc),
+                error_kind="business",
+                error_code="ws.business.chat_send_message.invalid",
+                error_details=self._extract_error_details(exc),
+            )
             return
         except PermissionDenied as exc:
-            await self.send_json({"type": "error", "message": str(exc), "event": "chat_send_message"})
+            await self._send_error(
+                event="chat_send_message",
+                message=str(exc),
+                error_kind="permission",
+                error_code="ws.permission.chat_send_message.denied",
+            )
             return
 
         await self._broadcast_chat_message(
             user_id=self.scope["user"].id,
-            client_message_id=str(content.get("client_message_id", "")).strip() or None,
+            client_message_id=validated_data.get("client_message_id"),
             payload=payload,
         )
 
     async def _handle_chat_send_asset_message(self, content: dict):
         from chat.application.commands.attachments import execute_send_asset_message_command
 
-        conversation_id = content.get("conversation_id")
+        validated_data = await self._validate_ws_payload(
+            ChatSendAssetMessageWsSerializer,
+            content,
+            event="chat_send_asset_message",
+            invalid_message="会话或资产引用非法",
+        )
+        if validated_data is None:
+            return
         try:
             payload = await database_sync_to_async(execute_send_asset_message_command)(
                 self.scope["user"],
-                int(conversation_id),
-                source_asset_reference_id=int(content.get("asset_reference_id")),
-                quoted_message_id=int(content.get("quoted_message_id")) if content.get("quoted_message_id") else None,
+                validated_data["conversation_id"],
+                source_asset_reference_id=validated_data["asset_reference_id"],
+                quoted_message_id=validated_data.get("quoted_message_id"),
                 emit_events=False,
             )
-        except (TypeError, ValueError):
-            await self.send_json({"type": "error", "message": "会话或资产引用非法", "event": "chat_send_asset_message"})
-            return
         except ValidationError as exc:
-            await self.send_json({"type": "error", "message": self._normalize_error(exc), "event": "chat_send_asset_message"})
+            await self._send_error(
+                event="chat_send_asset_message",
+                message=self._normalize_error(exc),
+                error_kind="business",
+                error_code="ws.business.chat_send_asset_message.invalid",
+                error_details=self._extract_error_details(exc),
+            )
             return
         except PermissionDenied as exc:
-            await self.send_json({"type": "error", "message": str(exc), "event": "chat_send_asset_message"})
+            await self._send_error(
+                event="chat_send_asset_message",
+                message=str(exc),
+                error_kind="permission",
+                error_code="ws.permission.chat_send_asset_message.denied",
+            )
             return
 
         await self._broadcast_chat_message(
             user_id=self.scope["user"].id,
-            client_message_id=str(content.get("client_message_id", "")).strip() or None,
+            client_message_id=validated_data.get("client_message_id"),
             payload=payload,
         )
 
     async def _handle_chat_mark_read(self, content: dict):
-        conversation_id = content.get("conversation_id")
-        last_read_sequence = content.get("last_read_sequence")
+        validated_data = await self._validate_ws_payload(
+            ChatMarkReadWsSerializer,
+            content,
+            event="chat_mark_read",
+            invalid_message="会话或已读序号非法",
+        )
+        if validated_data is None:
+            return
         try:
             payload = await database_sync_to_async(execute_mark_conversation_read_command)(
                 self.scope["user"],
-                int(conversation_id),
-                last_read_sequence=int(last_read_sequence),
+                validated_data["conversation_id"],
+                last_read_sequence=validated_data["last_read_sequence"],
             )
-        except (TypeError, ValueError):
-            await self.send_json({"type": "error", "message": "会话或已读序号非法", "event": "chat_mark_read"})
-            return
         except ValidationError as exc:
-            await self.send_json({"type": "error", "message": self._normalize_error(exc), "event": "chat_mark_read"})
+            await self._send_error(
+                event="chat_mark_read",
+                message=self._normalize_error(exc),
+                error_kind="business",
+                error_code="ws.business.chat_mark_read.invalid",
+                error_details=self._extract_error_details(exc),
+            )
             return
         except PermissionDenied as exc:
-            await self.send_json({"type": "error", "message": str(exc), "event": "chat_mark_read"})
+            await self._send_error(
+                event="chat_mark_read",
+                message=str(exc),
+                error_kind="permission",
+                error_code="ws.permission.chat_mark_read.denied",
+            )
             return
 
         await self._send_user_payload(
@@ -176,21 +269,36 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
         )
 
     async def _handle_chat_typing(self, content: dict):
-        conversation_id = content.get("conversation_id")
+        validated_data = await self._validate_ws_payload(
+            ChatTypingWsSerializer,
+            content,
+            event="chat_typing",
+            invalid_message="conversation_id 非法",
+        )
+        if validated_data is None:
+            return
         try:
             payload = await database_sync_to_async(execute_chat_typing_query)(
                 self.scope["user"],
-                int(conversation_id),
-                is_typing=bool(content.get("is_typing", False)),
+                validated_data["conversation_id"],
+                is_typing=validated_data.get("is_typing", False),
             )
-        except (TypeError, ValueError):
-            await self.send_json({"type": "error", "message": "conversation_id 非法", "event": "chat_typing"})
-            return
         except ValidationError as exc:
-            await self.send_json({"type": "error", "message": self._normalize_error(exc), "event": "chat_typing"})
+            await self._send_error(
+                event="chat_typing",
+                message=self._normalize_error(exc),
+                error_kind="business",
+                error_code="ws.business.chat_typing.invalid",
+                error_details=self._extract_error_details(exc),
+            )
             return
         except PermissionDenied as exc:
-            await self.send_json({"type": "error", "message": str(exc), "event": "chat_typing"})
+            await self._send_error(
+                event="chat_typing",
+                message=str(exc),
+                error_kind="permission",
+                error_code="ws.permission.chat_typing.denied",
+            )
             return
 
         for user_id in payload["target_user_ids"]:
@@ -253,10 +361,15 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
 
         # 订阅上传任务进度
         if message_type == "subscribe_upload_task":
-            task_id = str(content.get("task_id", "")).strip()
-            if not task_id:
-                await self.send_json({"type": "error", "message": "task_id 不能为空"})
+            validated_data = await self._validate_ws_payload(
+                UploadTaskSubscriptionWsSerializer,
+                content,
+                event="subscribe_upload_task",
+                invalid_message="task_id 不能为空",
+            )
+            if validated_data is None:
                 return
+            task_id = validated_data["task_id"]
 
             group_name = f"upload_task_{task_id}"
             if group_name not in self.upload_task_groups:
@@ -297,10 +410,15 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
 
         # 取消订阅上传任务进度
         if message_type == "unsubscribe_upload_task":
-            task_id = str(content.get("task_id", "")).strip()
-            if not task_id:
-                await self.send_json({"type": "error", "message": "task_id 不能为空"})
+            validated_data = await self._validate_ws_payload(
+                UploadTaskSubscriptionWsSerializer,
+                content,
+                event="unsubscribe_upload_task",
+                invalid_message="task_id 不能为空",
+            )
+            if validated_data is None:
                 return
+            task_id = validated_data["task_id"]
 
             group_name = f"upload_task_{task_id}"
             if group_name in self.upload_task_groups:
@@ -311,11 +429,15 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
             return
 
         # 回显消息
-        text = str(content.get("message", "")).strip()
-        if not text:
-            await self.send_json({"type": "error", "message": "消息不能为空"})
+        validated_data = await self._validate_ws_payload(
+            EchoWsSerializer,
+            content,
+            event="message",
+            invalid_message="消息不能为空",
+        )
+        if validated_data is None:
             return
-        await self.send_json({"type": "echo", "message": text})
+        await self.send_json({"type": "echo", "message": validated_data["message"]})
 
     async def upload_progress(self, event):
         """处理上传进度事件"""

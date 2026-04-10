@@ -1,6 +1,6 @@
 from django.urls import path
 
-from chat.views import (
+from chat.interfaces.api.views import (
 	AdminConversationListAPIView,
 	AdminMessageListAPIView,
 	ChatSearchAPIView,
@@ -13,7 +13,10 @@ from chat.views import (
 	ConversationMembersAPIView,
 	ConversationMessagesAPIView,
 	ConversationMuteMemberAPIView,
+	MessageDeleteAPIView,
 	MessageForwardAPIView,
+	MessageRestoreDraftAPIView,
+	MessageRevokeAPIView,
 	ConversationPinAPIView,
 	ConversationPreferenceAPIView,
 	ConversationReadAPIView,
@@ -52,6 +55,9 @@ urlpatterns = [
 	path("conversations/<int:conversation_id>/messages/", ConversationMessagesAPIView.as_view(), name="conversation_messages"),
 	path("conversations/<int:conversation_id>/attachments/", ConversationAttachmentMessageAPIView.as_view(), name="conversation_attachments"),
 	path("messages/forward/", MessageForwardAPIView.as_view(), name="message_forward"),
+	path("messages/<int:message_id>/delete/", MessageDeleteAPIView.as_view(), name="message_delete"),
+	path("messages/<int:message_id>/revoke/", MessageRevokeAPIView.as_view(), name="message_revoke"),
+	path("messages/<int:message_id>/restore-draft/", MessageRestoreDraftAPIView.as_view(), name="message_restore_draft"),
 	path("conversations/<int:conversation_id>/members/", ConversationMembersAPIView.as_view(), name="conversation_members"),
 	path("conversations/<int:conversation_id>/members/invite/", ConversationInviteAPIView.as_view(), name="conversation_member_invite"),
 	path("group-invitations/apply/", GroupInvitationApplyAPIView.as_view(), name="group_invitation_apply"),

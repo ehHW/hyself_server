@@ -12,6 +12,7 @@ urlpatterns = [
     path("upload/recycle-bin/restore/", views.RestoreRecycleBinEntryAPIView.as_view(), name="upload_recycle_bin_restore"),
     path("upload/recycle-bin/clear/", views.ClearRecycleBinAPIView.as_view(), name="upload_recycle_bin_clear"),
     path("upload/folders/", views.CreateFolderAPIView.as_view(), name="upload_folders"),
+    path("upload/chat-attachments/save/", views.SaveChatAttachmentToResourceAPIView.as_view(), name="upload_chat_attachment_save"),
     path("upload/delete/", views.DeleteFileEntryAPIView.as_view(), name="upload_delete"),
     path("upload/rename/", views.RenameFileEntryAPIView.as_view(), name="upload_rename"),
     path("upload/small/", views.UploadSmallFileAPIView.as_view(), name="upload_small"),

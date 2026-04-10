@@ -52,14 +52,29 @@ def _collect_subtree(entry: UploadedFile) -> list[UploadedFile]:
     return subtree
 
 
+def _sync_asset_refs_for_subtree(entry: UploadedFile) -> None:
+    from bbot.asset_compat import ensure_asset_reference_for_uploaded_file
+
+    for node in _collect_subtree(entry):
+        ensure_asset_reference_for_uploaded_file(node)
+
+
 def _purge_entry_tree(entry: UploadedFile) -> tuple[int, int, int]:
+    from bbot.models import Asset, AssetReference
+
     subtree = _collect_subtree(entry)
+    subtree_ids = [item.id for item in subtree]
     files = [item for item in subtree if not item.is_dir]
     dirs = sorted((item for item in subtree if item.is_dir), key=lambda item: len(item.relative_path or ""), reverse=True)
+    asset_refs = list(AssetReference.all_objects.select_related("asset").filter(legacy_uploaded_file_id__in=subtree_ids))
+    asset_ids = {item.asset_id for item in asset_refs if item.asset_id}
 
     removed_db_files = 0
     removed_db_dirs = 0
     removed_disk_files = 0
+
+    if asset_refs:
+        AssetReference.all_objects.filter(id__in=[item.id for item in asset_refs]).delete()
 
     for file_item in files:
         should_delete_disk = not UploadedFile.all_objects.filter(
@@ -87,6 +102,11 @@ def _purge_entry_tree(entry: UploadedFile) -> tuple[int, int, int]:
                     pass
         UploadedFile.all_objects.filter(id=dir_item.id).hard_delete()
         removed_db_dirs += 1
+
+    for asset_id in asset_ids:
+        if AssetReference.all_objects.filter(asset_id=asset_id).exists():
+            continue
+        Asset.all_objects.filter(id=asset_id).delete()
 
     return removed_db_files, removed_db_dirs, removed_disk_files
 
@@ -190,6 +210,7 @@ def move_entry_to_recycle_bin(entry: UploadedFile) -> int:
     entry.recycled_at = now
     entry.recycle_original_parent = original_parent
     entry.save(update_fields=["parent", "recycled_at", "recycle_original_parent", "updated_at"])
+    _sync_asset_refs_for_subtree(entry)
 
     return len(subtree_ids)
 
@@ -211,6 +232,7 @@ def restore_entry_from_recycle_bin(entry: UploadedFile) -> UploadedFile:
     entry.recycled_at = None
     entry.recycle_original_parent = None
     entry.save(update_fields=["display_name", "parent", "recycled_at", "recycle_original_parent", "updated_at"])
+    _sync_asset_refs_for_subtree(entry)
 
     UploadedFile.all_objects.filter(parent=entry, deleted_at__isnull=True).update(updated_at=timezone.now())
     return entry

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from django.db import transaction
 
+from bbot.application.services.asset_references import upsert_asset_reference, upsert_resource_center_reference, upsert_user_profile_avatar_reference
 from bbot.models import Asset, AssetReference, UploadedFile
 from utils.upload import media_url, normalize_relative_path
 
@@ -36,6 +37,8 @@ def build_asset_reference_domain(entry: UploadedFile) -> str:
     relative_path = normalize_relative_path(entry.relative_path)
     if entry.business == "profile" or relative_path.startswith("avatars/"):
         return AssetReference.RefDomain.USER_PROFILE
+    if entry.business == "chat":
+        return AssetReference.RefDomain.SYSTEM
     return AssetReference.RefDomain.RESOURCE_CENTER
 
 
@@ -71,6 +74,7 @@ def serialize_asset_payload(asset: Asset | None) -> dict | None:
         "width": asset.width,
         "height": asset.height,
         "duration_seconds": asset.duration_seconds,
+        "extra_metadata": asset.extra_metadata or {},
         "url": media_url(asset.storage_key) if asset.storage_key and asset.storage_backend == Asset.StorageBackend.LOCAL else "",
     }
 
@@ -168,40 +172,42 @@ def ensure_asset_reference_for_uploaded_file(entry: UploadedFile) -> AssetRefere
     if entry.parent_id:
         parent_reference = ensure_asset_reference_for_uploaded_file(entry.parent)
     asset = ensure_asset_for_uploaded_file(entry)
-    reference = AssetReference.all_objects.filter(legacy_uploaded_file=entry).first()
-    payload = {
-        "asset": asset,
-        "owner_user": entry.created_by,
-        "ref_domain": build_asset_reference_domain(entry),
-        "ref_type": build_asset_reference_type(entry),
-        "ref_object_id": str(entry.id),
-        "display_name": entry.display_name,
-        "parent_reference": parent_reference,
-        "relative_path_cache": normalize_relative_path(entry.relative_path),
-        "status": build_asset_reference_status(entry),
-        "recycled_at": entry.recycled_at,
-        "visibility": build_asset_reference_visibility(entry),
-        "extra_metadata": {
-            "legacy_uploaded_file_id": entry.id,
-            "legacy_business": entry.business,
-            "legacy_stored_name": entry.stored_name,
-            "legacy_is_dir": entry.is_dir,
-            "legacy_is_system": entry.is_system,
-            "legacy_parent_id": entry.parent_id,
-        },
-        "deleted_at": entry.deleted_at,
-    }
-    if reference is None:
-        return AssetReference.all_objects.create(legacy_uploaded_file=entry, **payload)
+    domain = build_asset_reference_domain(entry)
+    if domain == AssetReference.RefDomain.RESOURCE_CENTER:
+        return upsert_resource_center_reference(
+            entry=entry,
+            asset=asset,
+            parent_reference=parent_reference,
+        )
 
-    update_fields: list[str] = []
-    for field_name, value in payload.items():
-        if getattr(reference, field_name) != value:
-            setattr(reference, field_name, value)
-            update_fields.append(field_name)
-    if update_fields:
-        reference.save(update_fields=[*update_fields, "updated_at"])
-    return reference
+    if domain == AssetReference.RefDomain.SYSTEM:
+        return upsert_asset_reference(
+            lookup={"legacy_uploaded_file": entry},
+            values={
+                "asset": asset,
+                "owner_user": entry.created_by,
+                "ref_domain": AssetReference.RefDomain.SYSTEM,
+                "ref_type": build_asset_reference_type(entry),
+                "ref_object_id": str(entry.id),
+                "display_name": entry.display_name,
+                "parent_reference": parent_reference,
+                "relative_path_cache": normalize_relative_path(entry.relative_path),
+                "status": build_asset_reference_status(entry),
+                "recycled_at": entry.recycled_at,
+                "visibility": AssetReference.Visibility.SYSTEM,
+                "extra_metadata": {
+                    "legacy_uploaded_file_id": entry.id,
+                    "legacy_business": entry.business,
+                    "legacy_stored_name": entry.stored_name,
+                    "legacy_is_dir": entry.is_dir,
+                    "legacy_is_system": entry.is_system,
+                    "legacy_parent_id": entry.parent_id,
+                },
+                "deleted_at": entry.deleted_at,
+            },
+        )
+
+    raise ValueError("UploadedFile profile references should not be synchronized through resource center compat flow")
 
 
 def ensure_asset_compat_for_uploaded_file(entry: UploadedFile) -> tuple[Asset | None, AssetReference]:
@@ -252,36 +258,10 @@ def create_user_profile_asset_reference(*, user, display_name: str, relative_pat
         if update_fields:
             asset.save(update_fields=[*update_fields, "updated_at"])
 
-    reference = AssetReference.all_objects.filter(
-        owner_user=user,
-        ref_domain=AssetReference.RefDomain.USER_PROFILE,
-        ref_type=AssetReference.RefType.AVATAR,
-        ref_object_id=str(user.id),
-    ).first()
-    payload = {
-        "asset": asset,
-        "owner_user": user,
-        "ref_domain": AssetReference.RefDomain.USER_PROFILE,
-        "ref_type": AssetReference.RefType.AVATAR,
-        "ref_object_id": str(user.id),
-        "display_name": original_name,
-        "parent_reference": None,
-        "relative_path_cache": normalized_path,
-        "status": AssetReference.Status.ACTIVE,
-        "recycled_at": None,
-        "visibility": AssetReference.Visibility.PRIVATE,
-        "extra_metadata": {"profile_user_id": user.id, "source": "direct_avatar_upload"},
-        "deleted_at": None,
-        "legacy_uploaded_file": None,
-    }
-    if reference is None:
-        reference = AssetReference.all_objects.create(**payload)
-    else:
-        update_fields: list[str] = []
-        for field_name, value in payload.items():
-            if getattr(reference, field_name) != value:
-                setattr(reference, field_name, value)
-                update_fields.append(field_name)
-        if update_fields:
-            reference.save(update_fields=[*update_fields, "updated_at"])
+    reference = upsert_user_profile_avatar_reference(
+        asset=asset,
+        user=user,
+        display_name=original_name,
+        relative_path=normalized_path,
+    )
     return asset, reference

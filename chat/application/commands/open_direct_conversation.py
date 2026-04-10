@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from chat.domain.conversations import ensure_direct_conversation
 from chat.domain.serialization import serialize_conversation
-from ws.events import notify_chat_conversation_updated
+from chat.infrastructure.event_bus import notify_chat_conversation_updated
 
 
 @dataclass(frozen=True)

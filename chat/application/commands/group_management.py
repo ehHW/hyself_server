@@ -10,8 +10,20 @@ from chat.domain.group_policies import ensure_user_can_invite, require_group_mem
 from chat.domain.messaging import mute_member_until
 from chat.domain.serialization import serialize_conversation, serialize_group_config
 from chat.application.commands.realtime import execute_send_text_message_command
+from chat.infrastructure.repositories import (
+    create_pending_group_application_request,
+    direct_conversation_has_group_invitation,
+    get_active_direct_conversation_by_pair,
+    get_active_group_conversation,
+    get_active_member,
+    get_active_user,
+    get_group_join_request_with_context,
+    get_pending_group_join_request,
+    list_active_member_user_ids_by_roles,
+    list_active_members,
+)
 from chat.models import ChatConversation, ChatConversationMember, ChatGroupJoinRequest, build_pair_key
-from ws.events import notify_chat_conversation_updated, notify_chat_group_join_request_updated, notify_chat_system_notice
+from chat.infrastructure.event_bus import notify_chat_conversation_updated, notify_chat_group_join_request_updated, notify_chat_system_notice
 
 
 User = get_user_model()
@@ -39,32 +51,23 @@ def _build_group_invitation_payload(conversation: ChatConversation, inviter) -> 
 
 
 def _get_group_admin_user_ids(conversation: ChatConversation) -> set[int]:
-    return set(
-        ChatConversationMember.objects.filter(
-            conversation=conversation,
-            status=ChatConversationMember.Status.ACTIVE,
-            role__in=[ChatConversationMember.Role.OWNER, ChatConversationMember.Role.ADMIN],
-        ).values_list("user_id", flat=True)
-    )
+    return list_active_member_user_ids_by_roles(conversation, [ChatConversationMember.Role.OWNER, ChatConversationMember.Role.ADMIN])
 
 
 def _notify_group_conversation_to_active_members(conversation: ChatConversation) -> None:
-    active_members = ChatConversationMember.objects.select_related("user").filter(
-        conversation=conversation,
-        status=ChatConversationMember.Status.ACTIVE,
-    )
+    active_members = list_active_members(conversation)
     for member in active_members:
         notify_chat_conversation_updated(member.user_id, serialize_conversation(conversation, member.user))
 
 
 def execute_invite_group_member_command(current_user, conversation_id: int, target_user_id: int) -> tuple[dict, int]:
-    conversation = ChatConversation.objects.select_related("group_config").filter(id=conversation_id, status=ChatConversation.Status.ACTIVE, type=ChatConversation.Type.GROUP).first()
+    conversation = get_active_group_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
     member = get_member(conversation, current_user.id, active_only=True)
     if member is None:
         raise PermissionError("当前无权邀请成员")
-    target_user = User.objects.filter(id=target_user_id, deleted_at__isnull=True, is_active=True).first()
+    target_user = get_active_user(target_user_id)
     if target_user is None:
         raise User.DoesNotExist()
     if target_user.id == current_user.id:
@@ -90,34 +93,23 @@ def execute_invite_group_member_command(current_user, conversation_id: int, targ
 
 
 def execute_apply_group_invitation_command(current_user, conversation_id: int, inviter_user_id: int) -> tuple[dict, int]:
-    conversation = ChatConversation.objects.select_related("group_config").filter(
-        id=conversation_id,
-        status=ChatConversation.Status.ACTIVE,
-        type=ChatConversation.Type.GROUP,
-    ).first()
+    conversation = get_active_group_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
-    inviter_user = User.objects.filter(id=inviter_user_id, deleted_at__isnull=True, is_active=True).first()
+    inviter_user = get_active_user(inviter_user_id)
     if inviter_user is None:
         raise User.DoesNotExist()
     if get_member(conversation, current_user.id, active_only=True):
         raise ValueError("你已在群聊中")
-    direct_conversation = ChatConversation.objects.filter(
-        direct_pair_key=build_pair_key(current_user.id, inviter_user.id),
-        status=ChatConversation.Status.ACTIVE,
-        type=ChatConversation.Type.DIRECT,
-    ).first()
-    invitation_exists = direct_conversation is not None and direct_conversation.messages.filter(
-        sender_id=inviter_user.id,
-        payload__group_invitation__conversation_id=conversation.id,
-    ).exists()
+    direct_conversation = get_active_direct_conversation_by_pair(build_pair_key(current_user.id, inviter_user.id))
+    invitation_exists = direct_conversation_has_group_invitation(
+        direct_conversation=direct_conversation,
+        inviter_user_id=inviter_user.id,
+        conversation_id=conversation.id,
+    )
     if not invitation_exists:
         raise PermissionError("该群邀请已失效")
-    pending_request = ChatGroupJoinRequest.objects.filter(
-        conversation=conversation,
-        target_user=current_user,
-        status=ChatGroupJoinRequest.Status.PENDING,
-    ).first()
+    pending_request = get_pending_group_join_request(conversation, current_user)
     if pending_request is not None:
         return {
             "mode": "pending_approval",
@@ -125,12 +117,10 @@ def execute_apply_group_invitation_command(current_user, conversation_id: int, i
             "join_request": {"id": pending_request.id, "status": pending_request.status},
         }, 200
     if getattr(conversation.group_config, "join_approval_required", False):
-        join_request = ChatGroupJoinRequest.objects.create(
-            conversation=conversation,
-            request_type=ChatGroupJoinRequest.RequestType.APPLICATION,
+        join_request = create_pending_group_application_request(
+            conversation,
+            current_user,
             inviter=current_user,
-            target_user=current_user,
-            status=ChatGroupJoinRequest.Status.PENDING,
         )
         for admin_user_id in _get_group_admin_user_ids(conversation):
             notify_chat_group_join_request_updated(admin_user_id, _serialize_join_request_event(join_request))
@@ -151,7 +141,7 @@ def execute_apply_group_invitation_command(current_user, conversation_id: int, i
 
 
 def execute_leave_group_conversation_command(current_user, conversation_id: int) -> dict:
-    conversation = ChatConversation.objects.filter(id=conversation_id, status=ChatConversation.Status.ACTIVE, type=ChatConversation.Type.GROUP).first()
+    conversation = get_active_group_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
     member = get_member(conversation, current_user.id, active_only=True)
@@ -166,7 +156,7 @@ def execute_leave_group_conversation_command(current_user, conversation_id: int)
 
 
 def execute_remove_group_member_command(current_user, conversation_id: int, user_id: int) -> dict:
-    conversation = ChatConversation.objects.filter(id=conversation_id, status=ChatConversation.Status.ACTIVE, type=ChatConversation.Type.GROUP).first()
+    conversation = get_active_group_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
     actor_member = get_member(conversation, current_user.id, active_only=True)
@@ -184,12 +174,12 @@ def execute_remove_group_member_command(current_user, conversation_id: int, user
     target_member.show_in_list = False
     target_member.save(update_fields=["status", "removed_at", "removed_by", "show_in_list", "updated_at"])
     recalculate_member_count(conversation)
-    notify_chat_system_notice(target_member.user_id, "你已被移出群聊", {"conversation_id": conversation.id})
+    notify_chat_system_notice(target_member.user_id, "你已被移出群聊", {"conversation_id": conversation.id, "notice_type": "group_member_removed"})
     return {"detail": "已移出群成员", "conversation_id": conversation.id, "user_id": user_id}
 
 
 def execute_update_group_member_role_command(current_user, conversation_id: int, user_id: int, role: str) -> dict:
-    conversation = ChatConversation.objects.filter(id=conversation_id, status=ChatConversation.Status.ACTIVE, type=ChatConversation.Type.GROUP).first()
+    conversation = get_active_group_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
     actor_member = get_member(conversation, current_user.id, active_only=True)
@@ -206,7 +196,7 @@ def execute_update_group_member_role_command(current_user, conversation_id: int,
 
 
 def execute_mute_group_member_command(current_user, conversation_id: int, user_id: int, mute_minutes: int, reason: str = "") -> dict:
-    conversation = ChatConversation.objects.filter(id=conversation_id, status=ChatConversation.Status.ACTIVE, type=ChatConversation.Type.GROUP).first()
+    conversation = get_active_group_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
     actor_member = get_member(conversation, current_user.id, active_only=True)
@@ -230,7 +220,7 @@ def execute_mute_group_member_command(current_user, conversation_id: int, user_i
 
 
 def execute_update_group_config_command(current_user, conversation_id: int, data: dict) -> dict:
-    conversation = ChatConversation.objects.select_related("group_config").filter(id=conversation_id, status=ChatConversation.Status.ACTIVE, type=ChatConversation.Type.GROUP).first()
+    conversation = get_active_group_conversation(conversation_id)
     if conversation is None or not hasattr(conversation, "group_config"):
         raise ChatConversation.DoesNotExist()
     actor_member = get_member(conversation, current_user.id, active_only=True)
@@ -250,14 +240,14 @@ def execute_update_group_config_command(current_user, conversation_id: int, data
         if field in data:
             setattr(conversation.group_config, field, data[field])
     conversation.group_config.save()
-    active_members = ChatConversationMember.objects.select_related("user").filter(conversation=conversation, status=ChatConversationMember.Status.ACTIVE)
+    active_members = list_active_members(conversation)
     for member in active_members:
         notify_chat_conversation_updated(member.user_id, serialize_conversation(conversation, member.user))
     return {"detail": "群配置已更新", "conversation": serialize_conversation(conversation, current_user), "group_config": serialize_group_config(conversation.group_config)}
 
 
 def execute_handle_group_join_request_command(current_user, request_id: int, action: str, review_note: str = "") -> dict:
-    join_request = ChatGroupJoinRequest.objects.select_related("conversation", "target_user", "inviter", "reviewer", "conversation__group_config").filter(id=request_id).first()
+    join_request = get_group_join_request_with_context(request_id)
     if join_request is None:
         raise ChatGroupJoinRequest.DoesNotExist()
     if join_request.status != ChatGroupJoinRequest.Status.PENDING:

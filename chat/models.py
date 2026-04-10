@@ -216,3 +216,17 @@ class ChatMessage(TimestampedModel):
             models.Index(fields=["conversation", "id"]),
             models.Index(fields=["sender", "created_at"]),
         ]
+
+
+class ChatMessageVisibility(TimestampedModel):
+    message = models.ForeignKey("chat.ChatMessage", on_delete=models.CASCADE, related_name="hidden_entries")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="hidden_chat_messages")
+
+    class Meta:
+        db_table = "chat_message_visibility"
+        ordering = ["-id"]
+        constraints = [models.UniqueConstraint(fields=["message", "user"], name="uniq_chat_message_visibility_message_user")]
+        indexes = [
+            models.Index(fields=["user", "created_at"]),
+            models.Index(fields=["message", "created_at"]),
+        ]

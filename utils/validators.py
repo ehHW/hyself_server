@@ -6,7 +6,7 @@ from django.conf import settings
 
 
 # 常量定义
-ALLOWED_UPLOAD_CATEGORIES = {"", "profile"}
+ALLOWED_UPLOAD_CATEGORIES = {"", "profile", "chat"}
 ALLOWED_AVATAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 AVATAR_MAX_SIZE = int(getattr(settings, "AVATAR_MAX_SIZE", 5 * 1024 * 1024))
 

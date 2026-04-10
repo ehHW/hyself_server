@@ -7,6 +7,7 @@ from urllib.parse import unquote, urlparse
 
 from asgiref.sync import async_to_sync
 from asgiref.testing import ApplicationCommunicator
+from channels.layers import get_channel_layer
 from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.test import APIClient
@@ -20,6 +21,7 @@ from chat.models import ChatConversation, ChatConversationMember, ChatMessage
 from chat.models import ChatFriendship, ChatGroupConfig, ChatGroupJoinRequest, build_pair_key
 from user.models import User
 from utils.upload import get_temp_root
+from ws.event_bus import build_event
 
 
 class WebsocketCommunicator(ApplicationCommunicator):
@@ -255,6 +257,44 @@ class ChatAttachmentMessageTests(TestCase):
 		self.assertEqual(body["message"]["message_type"], ChatMessage.MessageType.FILE)
 		self.assertEqual(body["message"]["payload"]["source_asset_reference_id"], asset_reference_id)
 
+	def test_conversation_messages_api_returns_items_and_reveals_hidden_member(self):
+		self._create_active_friendship()
+		member = ChatConversationMember.objects.get(conversation=self.conversation, user=self.user)
+		member.show_in_list = False
+		member.save(update_fields=["show_in_list", "updated_at"])
+		message = ChatMessage.objects.create(
+			conversation=self.conversation,
+			sender=self.friend,
+			message_type=ChatMessage.MessageType.TEXT,
+			content="hello from friend",
+			sequence=1,
+		)
+
+		response = self.client.get(f"/api/chat/conversations/{self.conversation.id}/messages/")
+
+		self.assertEqual(response.status_code, 200)
+		body = response.json()
+		self.assertEqual(body["conversation"]["id"], self.conversation.id)
+		self.assertEqual(len(body["items"]), 1)
+		self.assertEqual(body["items"][0], {
+			"id": message.id,
+			"sequence": 1,
+			"client_message_id": None,
+			"message_type": ChatMessage.MessageType.TEXT,
+			"content": "hello from friend",
+			"payload": {},
+			"is_system": False,
+			"sender": {
+				"id": self.friend.id,
+				"username": self.friend.username,
+				"display_name": self.friend.display_name,
+				"avatar": self.friend.avatar,
+			},
+			"created_at": body["items"][0]["created_at"],
+		})
+		member.refresh_from_db()
+		self.assertTrue(member.show_in_list)
+
 	def test_forward_messages_api_copies_text_message_to_target_conversation(self):
 		self._create_active_friendship()
 		target_conversation = ChatConversation.objects.create(
@@ -417,6 +457,78 @@ class ChatAttachmentMessageTests(TestCase):
 		forwarded_message = ChatMessage.objects.filter(conversation=target_conversation, message_type=ChatMessage.MessageType.CHAT_RECORD).exclude(id=source_message.id).get()
 		self.assertEqual(forwarded_message.sender_id, self.user.id)
 		self.assertEqual(forwarded_message.payload["chat_record"]["title"], "群聊的聊天记录")
+
+	def test_forward_messages_api_rejects_malformed_chat_record_payload(self):
+		target_conversation = ChatConversation.objects.create(
+			type=ChatConversation.Type.GROUP,
+			status=ChatConversation.Status.ACTIVE,
+			name="转发目标",
+			owner=self.user,
+		)
+		ChatConversationMember.objects.create(
+			conversation=target_conversation,
+			user=self.user,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.OWNER,
+			show_in_list=True,
+		)
+		source_message = ChatMessage.objects.create(
+			conversation=self.group_conversation,
+			sequence=2,
+			sender=self.user,
+			message_type=ChatMessage.MessageType.CHAT_RECORD,
+			content="损坏聊天记录",
+			payload={"chat_record": {"title": "缺少 items"}},
+		)
+
+		response = self.client.post(
+			"/api/chat/messages/forward/",
+			{
+				"target_conversation_id": target_conversation.id,
+				"message_ids": [source_message.id],
+				"forward_mode": "separate",
+			},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(response.json()["message_ids"], "聊天记录消息缺少可转发内容")
+
+	def test_forward_messages_api_rejects_attachment_without_source_asset_reference(self):
+		self._create_active_friendship()
+		target_conversation = ChatConversation.objects.create(
+			type=ChatConversation.Type.GROUP,
+			status=ChatConversation.Status.ACTIVE,
+			name="转发目标",
+			owner=self.user,
+		)
+		ChatConversationMember.objects.create(
+			conversation=target_conversation,
+			user=self.user,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.OWNER,
+			show_in_list=True,
+		)
+		source_message = ChatMessage.objects.create(
+			conversation=self.conversation,
+			sequence=3,
+			sender=self.user,
+			message_type=ChatMessage.MessageType.FILE,
+			content="坏附件",
+			payload={"display_name": "坏附件"},
+		)
+
+		response = self.client.post(
+			"/api/chat/messages/forward/",
+			{
+				"target_conversation_id": target_conversation.id,
+				"message_ids": [source_message.id],
+			},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(response.json()["message_ids"], "附件消息缺少可转发的资产引用")
 
 	def test_invite_member_api_sends_group_invitation_message(self):
 		response = self.client.post(
@@ -629,6 +741,29 @@ class ChatAttachmentRealtimeWsTests(TransactionTestCase):
 			await sender_ws.disconnect()
 			await receiver_ws.disconnect()
 
+	async def _send_text_over_ws(self, *, content: str, quoted_message_id: int | None = None):
+		sender_ws = await self._connect_ws(self.user)
+		receiver_ws = await self._connect_ws(self.friend)
+		client_message_id = "ws_text_msg_1"
+		payload = {
+			"type": "chat_send_message",
+			"conversation_id": self.conversation.id,
+			"content": content,
+			"client_message_id": client_message_id,
+		}
+		if quoted_message_id is not None:
+			payload["quoted_message_id"] = quoted_message_id
+		try:
+			await sender_ws.send_json_to(payload)
+			sender_ack = await sender_ws.receive_json_from(timeout=3)
+			receiver_message = await receiver_ws.receive_json_from(timeout=3)
+			receiver_conversation = await receiver_ws.receive_json_from(timeout=3)
+			receiver_unread = await receiver_ws.receive_json_from(timeout=3)
+			return sender_ack, receiver_message, receiver_conversation, receiver_unread
+		finally:
+			await sender_ws.disconnect()
+			await receiver_ws.disconnect()
+
 	def test_ws_attachment_send_returns_ack_and_receiver_events(self):
 		uploaded = UploadedFile.objects.create(
 			created_by=self.user,
@@ -669,6 +804,31 @@ class ChatAttachmentRealtimeWsTests(TransactionTestCase):
 		self.assertEqual(message.message_type, ChatMessage.MessageType.IMAGE)
 		self.assertEqual(message.payload["source_asset_reference_id"], source_reference.id)
 
+	def test_ws_text_send_returns_ack_and_receiver_events(self):
+		sender_ack, receiver_message, receiver_conversation, receiver_unread = async_to_sync(self._send_text_over_ws)(content="ws 文本消息")
+
+		self.assertEqual(sender_ack["type"], "event")
+		self.assertEqual(sender_ack["event_type"], "chat.message.ack")
+		self.assertEqual(sender_ack["payload"]["client_message_id"], "ws_text_msg_1")
+		self.assertEqual(sender_ack["payload"]["message"]["content"], "ws 文本消息")
+
+		self.assertEqual(receiver_message["type"], "event")
+		self.assertEqual(receiver_message["event_type"], "chat.message.created")
+		self.assertEqual(receiver_message["payload"]["message"]["content"], "ws 文本消息")
+
+		self.assertEqual(receiver_conversation["type"], "event")
+		self.assertEqual(receiver_conversation["event_type"], "chat.conversation.updated")
+		self.assertEqual(receiver_conversation["payload"]["conversation"]["id"], self.conversation.id)
+
+		self.assertEqual(receiver_unread["type"], "event")
+		self.assertEqual(receiver_unread["event_type"], "chat.unread.updated")
+		self.assertEqual(receiver_unread["payload"]["conversation_id"], self.conversation.id)
+		self.assertEqual(receiver_unread["payload"]["unread_count"], 1)
+
+		message = ChatMessage.objects.get(conversation=self.conversation)
+		self.assertEqual(message.message_type, ChatMessage.MessageType.TEXT)
+		self.assertEqual(message.content, "ws 文本消息")
+
 	def test_ws_attachment_send_returns_error_for_non_friend_direct_conversation(self):
 		ChatFriendship.objects.filter(pair_key=self.friendship_pair_key).delete()
 		uploaded = UploadedFile.objects.create(
@@ -703,6 +863,8 @@ class ChatAttachmentRealtimeWsTests(TransactionTestCase):
 		self.assertEqual(error_event["type"], "error")
 		self.assertEqual(error_event["event"], "chat_send_asset_message")
 		self.assertEqual(error_event["message"], "你们还不是好友，当前私聊暂不支持发送附件")
+		self.assertEqual(error_event["error_kind"], "permission")
+		self.assertEqual(error_event["error_code"], "ws.permission.chat_send_asset_message.denied")
 		self.assertFalse(ChatMessage.objects.filter(conversation=self.conversation).exists())
 
 	def test_ws_text_message_can_include_reply_payload(self):
@@ -736,3 +898,131 @@ class ChatAttachmentRealtimeWsTests(TransactionTestCase):
 		self.assertEqual(sender_ack["event_type"], "chat.message.ack")
 		self.assertEqual(sender_ack["payload"]["message"]["payload"]["reply_to_message"]["id"], quoted_message.id)
 		self.assertEqual(sender_ack["payload"]["message"]["payload"]["reply_to_message"]["content_preview"], "被引用的原消息")
+
+	def test_ws_text_message_rejects_invalid_schema(self):
+		async def scenario():
+			sender_ws = await self._connect_ws(self.user)
+			try:
+				await sender_ws.send_json_to(
+					{
+						"type": "chat_send_message",
+						"conversation_id": "bad-id",
+						"content": "hello",
+					}
+				)
+				return await sender_ws.receive_json_from(timeout=3)
+			finally:
+				await sender_ws.disconnect()
+
+		error_event = async_to_sync(scenario)()
+
+		self.assertEqual(error_event["type"], "error")
+		self.assertEqual(error_event["event"], "chat_send_message")
+		self.assertEqual(error_event["message"], "消息参数非法")
+		self.assertEqual(error_event["error_kind"], "schema")
+		self.assertEqual(error_event["error_code"], "ws.schema.chat_send_message.invalid")
+		self.assertIn("conversation_id", error_event["error_details"])
+
+	def test_ws_upload_subscribe_rejects_blank_task_id(self):
+		async def scenario():
+			sender_ws = await self._connect_ws(self.user)
+			try:
+				await sender_ws.send_json_to(
+					{
+						"type": "subscribe_upload_task",
+						"task_id": "   ",
+					}
+				)
+				return await sender_ws.receive_json_from(timeout=3)
+			finally:
+				await sender_ws.disconnect()
+
+		error_event = async_to_sync(scenario)()
+
+		self.assertEqual(error_event["type"], "error")
+		self.assertEqual(error_event["event"], "subscribe_upload_task")
+		self.assertEqual(error_event["message"], "task_id 不能为空")
+		self.assertEqual(error_event["error_kind"], "schema")
+		self.assertEqual(error_event["error_code"], "ws.schema.subscribe_upload_task.invalid")
+		self.assertIn("task_id", error_event["error_details"])
+
+	def test_ws_notification_stream_covers_friend_group_notice_and_unread_updates(self):
+		group_conversation = ChatConversation.objects.create(
+			type=ChatConversation.Type.GROUP,
+			status=ChatConversation.Status.ACTIVE,
+			name="ws 群通知测试",
+			owner=self.user,
+		)
+		ChatGroupConfig.objects.create(
+			conversation=group_conversation,
+			join_approval_required=True,
+			allow_member_invite=True,
+		)
+		ChatConversationMember.objects.create(
+			conversation=group_conversation,
+			user=self.user,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.OWNER,
+			show_in_list=True,
+		)
+		async def scenario():
+			receiver_ws = await self._connect_ws(self.friend)
+			channel_layer = get_channel_layer()
+			self.assertIsNotNone(channel_layer)
+			try:
+				await channel_layer.group_send(
+					f"ws_user_{self.friend.id}",
+					{
+						"type": "system.event",
+						"payload": build_event("chat.friend_request.updated", {"request": {"id": 1, "status": "pending"}}, domain="chat"),
+					},
+				)
+				friend_request_event = await receiver_ws.receive_json_from(timeout=3)
+				await channel_layer.group_send(
+					f"ws_user_{self.friend.id}",
+					{
+						"type": "system.event",
+						"payload": build_event("chat.group_join_request.updated", {"join_request": {"id": 2, "conversation_id": group_conversation.id, "status": "pending"}}, domain="chat"),
+					},
+				)
+				group_notice_event = await receiver_ws.receive_json_from(timeout=3)
+				await channel_layer.group_send(
+					f"ws_user_{self.friend.id}",
+					{
+						"type": "system.event",
+						"payload": build_event("chat.unread.updated", {"conversation_id": self.conversation.id, "unread_count": 3, "total_unread_count": 5}, domain="chat"),
+					},
+				)
+				unread_event = await receiver_ws.receive_json_from(timeout=3)
+				await channel_layer.group_send(
+					f"ws_user_{self.friend.id}",
+					{
+						"type": "system.event",
+						"payload": build_event("chat.system_notice.created", {"category": "chat", "message": "你已加入群聊", "payload": {"conversation_id": group_conversation.id}}, domain="chat"),
+					},
+				)
+				system_notice_event = await receiver_ws.receive_json_from(timeout=3)
+				return friend_request_event, group_notice_event, unread_event, system_notice_event
+			finally:
+				await receiver_ws.disconnect()
+
+		friend_request_event, group_notice_event, unread_event, system_notice_event = async_to_sync(scenario)()
+
+		self.assertEqual(friend_request_event["type"], "event")
+		self.assertEqual(friend_request_event["event_type"], "chat.friend_request.updated")
+		self.assertEqual(friend_request_event["payload"]["request"]["status"], "pending")
+
+		self.assertEqual(group_notice_event["type"], "event")
+		self.assertEqual(group_notice_event["event_type"], "chat.group_join_request.updated")
+		self.assertEqual(group_notice_event["payload"]["join_request"]["conversation_id"], group_conversation.id)
+
+		self.assertEqual(unread_event["type"], "event")
+		self.assertEqual(unread_event["event_type"], "chat.unread.updated")
+		self.assertEqual(unread_event["payload"]["conversation_id"], self.conversation.id)
+		self.assertEqual(unread_event["payload"]["unread_count"], 3)
+		self.assertEqual(unread_event["payload"]["total_unread_count"], 5)
+
+		self.assertEqual(system_notice_event["type"], "event")
+		self.assertEqual(system_notice_event["event_type"], "chat.system_notice.created")
+		self.assertEqual(system_notice_event["payload"]["message"], "你已加入群聊")
+		self.assertEqual(system_notice_event["payload"]["payload"]["conversation_id"], group_conversation.id)

@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 from chat.domain.access import get_conversation_access
 from chat.domain.serialization import serialize_message
-from chat.models import ChatConversation, ChatMessage
+from chat.infrastructure.repositories import get_active_conversation, list_conversation_messages
+from chat.models import ChatConversation
 
 
 @dataclass(frozen=True)
@@ -16,14 +17,18 @@ class ConversationMessagesQueryParams:
 
 
 def execute_conversation_messages_query(user, conversation_id: int, params: ConversationMessagesQueryParams) -> dict:
-    conversation = ChatConversation.objects.select_related("owner", "group_config").filter(id=conversation_id, status=ChatConversation.Status.ACTIVE).first()
+    conversation = get_active_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
     access = get_conversation_access(user, conversation)
     if access.member is not None and not access.member.show_in_list:
         access.member.show_in_list = True
         access.member.save(update_fields=["show_in_list", "updated_at"])
-    queryset = ChatMessage.objects.select_related("sender").filter(conversation=conversation)
+    queryset = list_conversation_messages(
+        conversation,
+        user_id=None if access.access_mode == "stealth_readonly" else user.id,
+        include_hidden=access.access_mode == "stealth_readonly",
+    )
     if params.around_sequence:
         anchor_sequence = int(params.around_sequence)
         around_queryset = queryset.filter(sequence__lte=anchor_sequence).order_by("-sequence")

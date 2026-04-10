@@ -3,38 +3,23 @@ from __future__ import annotations
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from chat.application.commands.attachments import execute_send_asset_message_command
+from chat.application.commands.delivery import build_message_delivery_payloads, emit_message_delivery_events
+from chat.application.commands.message_payloads import ChatRecordItemPayload, ChatRecordPayload, build_message_preview, require_chat_record_payload, require_source_asset_reference_id, resolve_message_sender_name
 from chat.application.commands.realtime import execute_send_text_message_command
 from chat.domain.messaging import create_message, get_total_unread_count
 from chat.domain.access import get_conversation_access
-from chat.domain.serialization import serialize_conversation, serialize_message
-from chat.models import ChatConversation, ChatConversationMember, ChatMessage
-from ws.events import notify_chat_conversation_updated, notify_chat_new_message, notify_chat_unread_updated
+from chat.infrastructure.repositories import get_active_conversation, list_forwardable_messages
+from chat.models import ChatConversation, ChatMessage
 
 
-def _resolve_sender_name(message: ChatMessage) -> str:
-    sender_name = "系统"
-    if message.sender is not None:
-        sender_name = message.sender.display_name or message.sender.username
-    return sender_name
-
-
-def _build_message_preview(message: ChatMessage) -> str:
-    preview = message.content or ""
-    if message.message_type in {ChatMessage.MessageType.IMAGE, ChatMessage.MessageType.FILE}:
-        preview = str((message.payload or {}).get("display_name") or message.content or "附件")
-    elif message.message_type == ChatMessage.MessageType.CHAT_RECORD:
-        preview = str(((message.payload or {}).get("chat_record") or {}).get("title") or message.content or "聊天记录")
-    return preview[:120]
-
-
-def _serialize_chat_record_item(message: ChatMessage) -> dict:
+def _serialize_chat_record_item(message: ChatMessage) -> ChatRecordItemPayload:
     payload = message.payload or {}
     item = {
         "source_message_id": message.id,
         "sequence": message.sequence,
         "conversation_id": message.conversation_id,
         "message_type": message.message_type,
-        "sender_name": _resolve_sender_name(message),
+        "sender_name": resolve_message_sender_name(message),
         "sender_avatar": "" if message.sender is None else (message.sender.avatar or ""),
         "content": message.content or "",
     }
@@ -63,7 +48,7 @@ def _build_merged_record_title(selected_messages: list[ChatMessage]) -> str:
 
     sender_names: list[str] = []
     for message in selected_messages:
-        sender_name = _resolve_sender_name(message)
+        sender_name = resolve_message_sender_name(message)
         if sender_name not in sender_names:
             sender_names.append(sender_name)
     if not sender_names:
@@ -75,7 +60,7 @@ def _build_merged_record_title(selected_messages: list[ChatMessage]) -> str:
     return f"{sender_names[0]}和{sender_names[1]}等的聊天记录"
 
 
-def _build_chat_record_payload(selected_messages: list[ChatMessage]) -> dict:
+def _build_chat_record_payload(selected_messages: list[ChatMessage]) -> ChatRecordPayload:
     return {
         "version": 1,
         "title": _build_merged_record_title(selected_messages),
@@ -85,36 +70,21 @@ def _build_chat_record_payload(selected_messages: list[ChatMessage]) -> dict:
 
 
 def _emit_message_events(*, user, conversation: ChatConversation, message: ChatMessage) -> None:
-    conversation = ChatConversation.objects.select_related("owner", "group_config").get(pk=conversation.pk)
-    message_payload = serialize_message(message)
-    sender_conversation = serialize_conversation(conversation, user)
-    recipient_members = list(
-        ChatConversationMember.objects.select_related("user").filter(conversation=conversation, status=ChatConversationMember.Status.ACTIVE).exclude(user_id=user.id)
+    conversation, message_payload, sender_conversation, recipient_payloads = build_message_delivery_payloads(
+        conversation=conversation,
+        sender_user=user,
+        message=message,
     )
-    hidden_recipient_ids = [item.pk for item in recipient_members if not item.show_in_list]
-    if hidden_recipient_ids:
-        ChatConversationMember.objects.filter(pk__in=hidden_recipient_ids).update(show_in_list=True)
-    recipient_payloads = []
-    for recipient_member in recipient_members:
-        refreshed_member = ChatConversationMember.objects.get(pk=recipient_member.pk)
-        recipient_payloads.append(
-            {
-                "user_id": recipient_member.user_id,
-                "conversation": serialize_conversation(conversation, recipient_member.user),
-                "unread_count": refreshed_member.unread_count,
-                "total_unread_count": get_total_unread_count(recipient_member.user),
-            }
-        )
-
-    notify_chat_new_message(user.id, {"conversation_id": conversation.id, "message": message_payload})
-    notify_chat_conversation_updated(user.id, sender_conversation)
-    for recipient in recipient_payloads:
-        notify_chat_new_message(recipient["user_id"], {"conversation_id": conversation.id, "message": message_payload})
-        notify_chat_conversation_updated(recipient["user_id"], recipient["conversation"])
-        notify_chat_unread_updated(recipient["user_id"], conversation.id, recipient["unread_count"], recipient["total_unread_count"])
+    emit_message_delivery_events(
+        conversation=conversation,
+        sender_user=user,
+        message_payload=message_payload,
+        sender_conversation=sender_conversation,
+        recipient_payloads=recipient_payloads,
+    )
 
 
-def _send_chat_record_message(user, *, target_conversation: ChatConversation, chat_record_payload: dict, emit_events: bool = True) -> ChatMessage:
+def _send_chat_record_message(user, *, target_conversation: ChatConversation, chat_record_payload: ChatRecordPayload, emit_events: bool = True) -> ChatMessage:
     access = get_conversation_access(user, target_conversation)
     if access.access_mode != "member" or not access.can_send_message:
         raise PermissionDenied("当前无权向目标会话转发消息")
@@ -139,10 +109,7 @@ def execute_forward_messages_command(user, *, target_conversation_id: int, messa
     if forward_mode not in {"separate", "merged"}:
         raise ValidationError({"forward_mode": "转发方式不支持"})
 
-    target_conversation = ChatConversation.objects.select_related("owner", "group_config").filter(
-        id=target_conversation_id,
-        status=ChatConversation.Status.ACTIVE,
-    ).first()
+    target_conversation = get_active_conversation(target_conversation_id)
     if target_conversation is None:
         raise ValidationError({"target_conversation_id": "目标会话不存在"})
 
@@ -150,11 +117,7 @@ def execute_forward_messages_command(user, *, target_conversation_id: int, messa
     if target_access.access_mode != "member" or not target_access.can_send_message:
         raise PermissionDenied("当前无权向目标会话转发消息")
 
-    selected_messages = list(
-        ChatMessage.objects.select_related("conversation", "sender")
-        .filter(id__in=message_ids, is_system=False)
-        .order_by("created_at", "sequence", "id")
-    )
+    selected_messages = list_forwardable_messages(message_ids)
     if not selected_messages:
         raise ValidationError({"message_ids": "未找到可转发消息"})
     if len(selected_messages) != len(set(message_ids)):
@@ -190,9 +153,9 @@ def execute_forward_messages_command(user, *, target_conversation_id: int, messa
             continue
 
         if source_message.message_type in {ChatMessage.MessageType.IMAGE, ChatMessage.MessageType.FILE}:
-            source_payload = source_message.payload or {}
-            source_asset_reference_id = int(source_payload.get("source_asset_reference_id") or source_payload.get("asset_reference_id") or 0)
-            if not source_asset_reference_id:
+            try:
+                source_asset_reference_id = require_source_asset_reference_id(source_message.payload or {})
+            except ValueError:
                 raise ValidationError({"message_ids": "附件消息缺少可转发的资产引用"})
             execute_send_asset_message_command(
                 user,
@@ -204,8 +167,9 @@ def execute_forward_messages_command(user, *, target_conversation_id: int, messa
             continue
 
         if source_message.message_type == ChatMessage.MessageType.CHAT_RECORD:
-            chat_record_payload = (source_message.payload or {}).get("chat_record")
-            if not isinstance(chat_record_payload, dict):
+            try:
+                chat_record_payload = require_chat_record_payload((source_message.payload or {}).get("chat_record"))
+            except ValueError:
                 raise ValidationError({"message_ids": "聊天记录消息缺少可转发内容"})
             _send_chat_record_message(user, target_conversation=target_conversation, chat_record_payload=chat_record_payload, emit_events=True)
             forwarded_count += 1

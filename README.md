@@ -107,6 +107,12 @@ python manage.py runserver 127.0.0.1:8000
 uvicorn bbot_server.asgi:application --host 127.0.0.1 --port 8000 --reload --lifespan off
 ```
 
+如果你是在 workspace 根目录 `d:/work/SolBot` 启动，而不是先切进 `bbot_server/`，请使用下面这条更稳的显式命令，避免 `Could not import module "bbot_server.asgi"` 这类路径问题：
+
+```bash
+d:/work/SolBot/bbot_server/.venv/Scripts/python.exe -m uvicorn --app-dir d:/work/SolBot/bbot_server bbot_server.asgi:application --host 127.0.0.1 --port 8000 --reload --lifespan off
+```
+
 当前 WebSocket 入口：
 
 - /ws/global/
@@ -119,6 +125,12 @@ uvicorn bbot_server.asgi:application --host 127.0.0.1 --port 8000 --reload --lif
 
 ```bash
 celery -A bbot_server worker -l info --pool=solo -c 1
+```
+
+如果你是在 workspace 根目录 `d:/work/SolBot` 启动，请改用下面这条显式工作目录与 app 路径的命令，避免 `Module 'bbot_server' has no attribute 'celery'`：
+
+```bash
+d:/work/SolBot/bbot_server/.venv/Scripts/python.exe -m celery --workdir d:/work/SolBot/bbot_server -A bbot_server.celery:app worker -l info --pool=solo -c 1
 ```
 
 Windows 推荐固定使用上面的 solo 模式，避免 billiard 相关兼容问题。
@@ -154,6 +166,8 @@ python manage.py cleanup_recycle_bin
 - 大文件分片上传、续传、合并
 - 基于 MD5 的重复文件识别
 - 回收站同 MD5 文件恢复到用户当前选定目录
+- 用户资源列表仅返回活动中的 RESOURCE_CENTER 引用；删除或还原时会同步更新兼容 UploadedFile 与 AssetReference 状态
+- 回收站目录内列出真实回收文件树，避免资源中心活动引用与回收站视图不一致
 
 ### 聊天室
 
@@ -161,6 +175,7 @@ python manage.py cleanup_recycle_bin
 - 好友申请、好友列表、好友备注
 - 群创建、邀请、退群、成员管理
 - 文本消息与附件消息
+- 视频附件处理会写入 HLS 播放地址与缩略图地址；缩略图和播放列表 URL 带版本参数，降低浏览器旧缓存干扰
 - 多消息逐条转发与合并转发
 - chat_record 聊天记录消息类型
 - 文本 / 附件消息历史查询

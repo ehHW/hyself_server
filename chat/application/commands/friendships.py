@@ -9,8 +9,14 @@ from chat.domain.common import user_brief
 from chat.domain.friend_requests import create_friend_request, handle_friend_request_action
 from chat.domain.friendships import get_active_friendship_between, update_friendship_remark
 from chat.domain.serialization import serialize_conversation, serialize_friend_request, serialize_friendship
-from chat.models import ChatConversation, ChatFriendRequest, ChatFriendship, build_pair_key
-from ws.events import notify_chat_conversation_updated, notify_chat_friend_request_updated, notify_chat_friendship_updated
+from chat.infrastructure.repositories import (
+    get_active_direct_conversation_by_pair,
+    get_active_user,
+    get_friend_request_with_users,
+    get_friendship_by_pair,
+)
+from chat.models import ChatFriendRequest, ChatFriendship, build_pair_key
+from chat.infrastructure.event_bus import notify_chat_conversation_updated, notify_chat_friend_request_updated, notify_chat_friendship_updated, notify_chat_system_notice
 
 
 User = get_user_model()
@@ -23,7 +29,7 @@ class SubmitFriendRequestCommandResult:
 
 
 def execute_submit_friend_request_command(current_user, target_user_id: int, request_message: str) -> SubmitFriendRequestCommandResult:
-    target_user = User.objects.filter(id=target_user_id, deleted_at__isnull=True, is_active=True).first()
+    target_user = get_active_user(target_user_id)
     if target_user is None:
         raise User.DoesNotExist()
     mode, friend_request, friendship, conversation = create_friend_request(current_user, target_user, request_message)
@@ -49,7 +55,7 @@ def execute_submit_friend_request_command(current_user, target_user_id: int, req
 
 
 def execute_handle_friend_request_command(current_user, request_id: int, action: str) -> dict:
-    friend_request = ChatFriendRequest.objects.select_related("from_user", "to_user", "handled_by").filter(id=request_id).first()
+    friend_request = get_friend_request_with_users(request_id)
     if friend_request is None:
         raise ChatFriendRequest.DoesNotExist()
     friend_request, friendship, conversation = handle_friend_request_action(friend_request, action, current_user)
@@ -75,18 +81,28 @@ def execute_delete_friend_command(current_user, friend_user_id: int) -> dict:
     friendship.save(update_fields=["status", "deleted_at", "updated_at"])
     notify_chat_friendship_updated(current_user.id, {"action": "deleted", "friend_user": {"id": friend_user_id}})
     notify_chat_friendship_updated(friend_user_id, {"action": "deleted", "friend_user": {"id": current_user.id}})
+    notify_chat_system_notice(
+        friend_user_id,
+        "对方已将你移除好友",
+        {
+            "notice_type": "friend_deleted",
+            "notice_id": f"friend_deleted_{current_user.id}_{friend_user_id}_{int(timezone.now().timestamp())}",
+            "description": f"{current_user.display_name or current_user.username} 已将你从好友列表中移除",
+            "friend_user_id": current_user.id,
+        },
+    )
     return {"detail": "已删除好友", "friend_user_id": friend_user_id}
 
 
 def execute_update_friend_setting_command(current_user, friend_user_id: int, *, remark: str | None = None) -> dict:
-    friendship = ChatFriendship.objects.filter(pair_key=build_pair_key(current_user.id, friend_user_id)).first()
+    friendship = get_friendship_by_pair(build_pair_key(current_user.id, friend_user_id))
     if friendship is None:
         raise ChatFriendship.DoesNotExist()
     if remark is not None:
         update_friendship_remark(friendship, current_user.id, remark)
-    conversation = ChatConversation.objects.filter(direct_pair_key=friendship.pair_key, status=ChatConversation.Status.ACTIVE).first()
+    conversation = get_active_direct_conversation_by_pair(friendship.pair_key)
     if conversation is not None:
-        target_user = User.objects.filter(id=friend_user_id, deleted_at__isnull=True, is_active=True).first()
+        target_user = get_active_user(friend_user_id)
         for actor in [current_user, target_user]:
             if actor is not None:
                 notify_chat_conversation_updated(actor.id, serialize_conversation(conversation, actor))
