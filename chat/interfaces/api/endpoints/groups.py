@@ -1,4 +1,4 @@
-from auth.permissions import AuthenticatedPermission as IsAuthenticated
+from auth.permissions import AuthenticatedPermission as IsAuthenticated, ensure_request_permission
 from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.response import Response
@@ -6,11 +6,13 @@ from rest_framework.views import APIView
 
 from chat.application.commands import (
     execute_apply_group_invitation_command,
+    execute_disband_group_conversation_command,
     execute_handle_group_join_request_command,
     execute_invite_group_member_command,
     execute_leave_group_conversation_command,
     execute_mute_group_member_command,
     execute_remove_group_member_command,
+    execute_transfer_group_owner_command,
     execute_update_group_config_command,
     execute_update_group_member_role_command,
 )
@@ -21,6 +23,7 @@ from chat.interfaces.api.serializer_scenes.groups import (
     GroupJoinRequestHandleSerializer,
     InviteConversationMemberSerializer,
     MuteConversationMemberSerializer,
+    TransferGroupOwnerSerializer,
     UpdateConversationMemberRoleSerializer,
 )
 from chat.models import ChatConversation, ChatConversationMember, ChatGroupJoinRequest
@@ -33,6 +36,7 @@ class ConversationMembersAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, conversation_id: int):
+        ensure_request_permission(request, "chat.view_conversation")
         if not ChatConversation.objects.filter(id=conversation_id, status=ChatConversation.Status.ACTIVE, type=ChatConversation.Type.GROUP).exists():
             return Response({"detail": "群聊不存在"}, status=status.HTTP_404_NOT_FOUND)
         return Response(execute_list_group_members_query(request.user, conversation_id))
@@ -61,13 +65,14 @@ class GroupInvitationApplyAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        ensure_request_permission(request, "chat.view_conversation")
         serializer = ApplyGroupInvitationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
             payload, response_status = execute_apply_group_invitation_command(
                 request.user,
                 serializer.validated_data["conversation_id"],
-                serializer.validated_data["inviter_user_id"],
+                serializer.validated_data.get("inviter_user_id"),
             )
         except ChatConversation.DoesNotExist:
             return Response({"detail": "群聊不存在"}, status=status.HTTP_404_NOT_FOUND)
@@ -84,12 +89,45 @@ class ConversationLeaveAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, conversation_id: int):
+        ensure_request_permission(request, "chat.view_conversation")
         if not ChatConversation.objects.filter(id=conversation_id, status=ChatConversation.Status.ACTIVE, type=ChatConversation.Type.GROUP).exists():
             return Response({"detail": "群聊不存在"}, status=status.HTTP_404_NOT_FOUND)
         try:
             payload = execute_leave_group_conversation_command(request.user, conversation_id)
         except ValueError as error:
             return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(payload)
+
+
+class ConversationTransferOwnerAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, conversation_id: int):
+        serializer = TransferGroupOwnerSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if not ChatConversation.objects.filter(id=conversation_id, status=ChatConversation.Status.ACTIVE, type=ChatConversation.Type.GROUP).exists():
+            return Response({"detail": "群聊不存在"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            payload = execute_transfer_group_owner_command(request.user, conversation_id, serializer.validated_data["target_user_id"])
+        except ChatConversationMember.DoesNotExist:
+            return Response({"detail": "目标成员不存在"}, status=status.HTTP_404_NOT_FOUND)
+        except PermissionError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_403_FORBIDDEN)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(payload)
+
+
+class ConversationDisbandAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, conversation_id: int):
+        if not ChatConversation.objects.filter(id=conversation_id, status=ChatConversation.Status.ACTIVE, type=ChatConversation.Type.GROUP).exists():
+            return Response({"detail": "群聊不存在"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            payload = execute_disband_group_conversation_command(request.user, conversation_id)
+        except PermissionError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_403_FORBIDDEN)
         return Response(payload)
 
 

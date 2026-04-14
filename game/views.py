@@ -1,4 +1,4 @@
-from auth.permissions import AuthenticatedPermission as IsAuthenticated
+from auth.permissions import AuthenticatedPermission as IsAuthenticated, ensure_request_permission
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -19,6 +19,7 @@ def _resolve_limit(raw_value: str | None, default: int = 10, minimum: int = 1, m
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_best_record_view(request):
+	ensure_request_permission(request, "game.view_leaderboard")
 	game_code = str(request.query_params.get("game_code", "")).strip().lower()
 	if not game_code:
 		return Response({"detail": "game_code 不能为空"}, status=status.HTTP_400_BAD_REQUEST)
@@ -32,6 +33,7 @@ def my_best_record_view(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def leaderboard_view(request):
+	ensure_request_permission(request, "game.view_leaderboard")
 	game_code = str(request.query_params.get("game_code", "")).strip().lower()
 	if not game_code:
 		return Response({"detail": "game_code 不能为空"}, status=status.HTTP_400_BAD_REQUEST)
@@ -56,6 +58,7 @@ def leaderboard_view(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def submit_best_record_view(request):
+	ensure_request_permission(request, "game.submit_best_record")
 	serializer = SubmitBestRecordSerializer(data=request.data)
 	serializer.is_valid(raise_exception=True)
 	validated = serializer.validated_data

@@ -8,6 +8,7 @@ from user.views import (
     UserViewSet,
     change_password_view,
     login_view,
+    permission_context_view,
     profile_view,
 )
 
@@ -20,6 +21,7 @@ urlpatterns = [
     path("auth/login/", login_view, name="login"),
     path("auth/refresh/", JwtTokenRefreshView.as_view(), name="token_refresh"),
     path("auth/profile/", profile_view, name="profile"),
+    path("auth/permission-context/", permission_context_view, name="permission_context"),
     path("auth/change-password/", change_password_view, name="change_password"),
     path("", include(router.urls)),
 ]

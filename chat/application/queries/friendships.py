@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from chat.domain.access import get_conversation_access
+from rest_framework.exceptions import PermissionDenied
+
+from chat.domain.access import get_conversation_denied_detail, get_conversation_access, get_member
 from chat.domain.common import to_serializable_datetime, user_brief
 from chat.domain.friendships import friendship_remark, get_active_friendship_between
 from chat.domain.serialization import serialize_friend_request, serialize_friendship
@@ -47,7 +49,8 @@ def execute_list_group_members_query(user, conversation_id: int) -> dict:
     conversation, items = get_accessible_group_members(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
-    get_conversation_access(user, conversation)
+    if get_member(conversation, user.id, active_only=True) is None:
+        raise PermissionDenied(get_conversation_denied_detail(conversation, user.id, action="查看群成员"))
 
     def member_sort_key(item):
         role_order = 0 if item.role == conversation.members.model.Role.OWNER else 1 if item.role == conversation.members.model.Role.ADMIN else 2

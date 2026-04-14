@@ -30,3 +30,14 @@ def notify_user_force_logout(user_id: int, operator_username: str) -> None:
         },
         domain="system",
     )
+
+
+def notify_user_permission_updated(user_id: int, *, reason: str = "permissions_updated") -> None:
+    publish_user_event(
+        user_id,
+        "user.permission.updated",
+        {
+            "reason": reason,
+        },
+        domain="user",
+    )

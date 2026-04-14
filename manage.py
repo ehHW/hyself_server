@@ -6,7 +6,7 @@ import sys
 
 def main():
     """执行管理任务。"""
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'bbot_server.settings')
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'hyself_server.settings')
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

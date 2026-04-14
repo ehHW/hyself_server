@@ -1,5 +1,5 @@
 def main():
-    print("Hello from bbot-server!")
+    print("Hello from hyself-server!")
 
 
 if __name__ == "__main__":

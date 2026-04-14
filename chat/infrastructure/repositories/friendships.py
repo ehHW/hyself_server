@@ -9,6 +9,14 @@ from chat.models import ChatFriendRequest, ChatFriendship
 User = get_user_model()
 
 
+def search_active_users(*, keyword: str, limit: int):
+    return User.objects.filter(
+        Q(username__icontains=keyword) | Q(display_name__icontains=keyword),
+        deleted_at__isnull=True,
+        is_active=True,
+    )[:limit]
+
+
 def list_friend_requests_for_user(user, *, direction: str, status_filter: str = ""):
     queryset = ChatFriendRequest.objects.select_related("from_user", "to_user", "handled_by")
     if direction == "sent":
@@ -45,3 +53,22 @@ def list_friendships_for_user(user, *, keyword: str = "") -> list[ChatFriendship
             if lowered in (item.user_low.display_name or item.user_low.username).lower() or lowered in (item.user_high.display_name or item.user_high.username).lower()
         ]
     return results
+
+
+def search_friend_users(user, *, keyword: str, limit: int):
+    friend_links = list(
+        ChatFriendship.objects.select_related("user_low", "user_high")
+        .filter(status=ChatFriendship.Status.ACTIVE)
+        .filter(Q(user_low_id=user.id) | Q(user_high_id=user.id))
+    )
+    users = []
+    keyword_lower = keyword.lower()
+    for friendship in friend_links:
+        target_user = friendship.user_high if friendship.user_low_id == user.id else friendship.user_low
+        haystack = f"{target_user.username} {target_user.display_name}".lower()
+        if keyword_lower not in haystack:
+            continue
+        users.append(target_user)
+        if len(users) >= limit:
+            break
+    return users

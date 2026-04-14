@@ -9,7 +9,7 @@ class InviteConversationMemberSerializer(serializers.Serializer):
 
 class ApplyGroupInvitationSerializer(serializers.Serializer):
     conversation_id = serializers.IntegerField(min_value=1)
-    inviter_user_id = serializers.IntegerField(min_value=1)
+    inviter_user_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
 
 
 class UpdateConversationMemberRoleSerializer(serializers.Serializer):
@@ -19,6 +19,10 @@ class UpdateConversationMemberRoleSerializer(serializers.Serializer):
 class MuteConversationMemberSerializer(serializers.Serializer):
     mute_minutes = serializers.IntegerField(min_value=0, max_value=60 * 24 * 30)
     reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+
+class TransferGroupOwnerSerializer(serializers.Serializer):
+    target_user_id = serializers.IntegerField(min_value=1)
 
 
 class GroupConfigUpdateSerializer(serializers.ModelSerializer):

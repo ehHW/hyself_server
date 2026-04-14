@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from chat.domain.access import get_conversation_access
+from chat.domain.access import (
+    build_discover_preview_capabilities,
+    get_conversation_access,
+    serialize_conversation_capabilities,
+    user_can_stealth_inspect,
+)
 from chat.application.commands.message_payloads import build_reply_payload_from_message, is_message_revoked
 from chat.domain.common import to_serializable_datetime, user_brief
 from chat.domain.friendships import friendship_counterparty, friendship_remark, get_active_friendship_between
 from chat.domain.member_settings import get_member_preferences
 from chat.infrastructure.repositories import get_latest_visible_message
-from bbot.models import AssetReference
-from utils.upload import media_url
+from hyself.models import AssetReference
+from hyself.utils.upload import media_url
 from chat.models import ChatConversation, ChatConversationMember, ChatFriendRequest, ChatFriendship, ChatGroupConfig, ChatMessage, build_pair_key
 
 
@@ -24,6 +29,7 @@ def serialize_message(message: ChatMessage) -> dict:
                 payload["stream_url"] = str(video_processing.get("playlist_url") or payload.get("stream_url") or "")
                 payload["thumbnail_url"] = str(video_processing.get("thumbnail_url") or payload.get("thumbnail_url") or "")
                 payload["processing_status"] = str(video_processing.get("status") or payload.get("processing_status") or "")
+                payload["subtitle_tracks"] = video_processing.get("subtitle_tracks") or payload.get("subtitle_tracks") or []
     reply_payload = payload.get("reply_to_message")
     if isinstance(reply_payload, dict) and isinstance(reply_payload.get("id"), int):
         reply_message = ChatMessage.objects.filter(id=reply_payload["id"]).first()
@@ -55,7 +61,9 @@ def serialize_group_config(group_config: ChatGroupConfig | None) -> dict | None:
 
 def serialize_conversation(conversation: ChatConversation, user) -> dict:
     access = get_conversation_access(user, conversation)
+    include_hidden_messages = user_can_stealth_inspect(user)
     member = access.member
+    is_member_access = access.access_mode == "member" and member is not None
     display_name = conversation.name
     avatar = conversation.avatar
     direct_target = None
@@ -70,8 +78,8 @@ def serialize_conversation(conversation: ChatConversation, user) -> dict:
             friend_remark = friendship_remark(friendship, user.id) or None
     latest_visible_message = get_latest_visible_message(
         conversation,
-        user_id=None if access.access_mode == "stealth_readonly" else user.id,
-        include_hidden=access.access_mode == "stealth_readonly",
+        user_id=None if include_hidden_messages else user.id,
+        include_hidden=include_hidden_messages,
     )
     last_message_preview = conversation.last_message_preview
     last_message_at = to_serializable_datetime(conversation.last_message_at)
@@ -88,20 +96,31 @@ def serialize_conversation(conversation: ChatConversation, user) -> dict:
         "avatar": avatar,
         "direct_target": direct_target,
         "friend_remark": friend_remark,
-        "is_pinned": False if member is None else member.is_pinned,
+        "is_pinned": member.is_pinned if is_member_access else False,
         "access_mode": access.access_mode,
-        "member_role": None if member is None else member.role,
-        "show_in_list": True if member is None else member.show_in_list,
-        "unread_count": 0 if member is None else member.unread_count,
+        "member_role": member.role if is_member_access else None,
+        "show_in_list": member.show_in_list if member is not None else True,
+        "unread_count": member.unread_count if is_member_access else 0,
         "last_message_preview": last_message_preview,
         "last_message_at": last_message_at,
         "member_count": conversation.member_count_cache,
         "can_send_message": access.can_send_message,
+        "capabilities": serialize_conversation_capabilities(access.capabilities),
         "status": conversation.status,
-        "last_read_sequence": 0 if member is None else member.last_read_sequence,
+        "last_read_sequence": member.last_read_sequence if is_member_access else 0,
         "member_settings": get_member_preferences(member),
         "group_config": serialize_group_config(getattr(conversation, "group_config", None)) if conversation.type == ChatConversation.Type.GROUP else None,
         "owner": None if conversation.owner is None else user_brief(conversation.owner),
+    }
+
+
+def serialize_discover_preview_conversation(conversation: ChatConversation) -> dict:
+    return {
+        "id": conversation.id,
+        "type": conversation.type,
+        "name": conversation.name,
+        "access_mode": "discover_preview",
+        "capabilities": serialize_conversation_capabilities(build_discover_preview_capabilities()),
     }
 
 

@@ -6,7 +6,7 @@ from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
-from bbot_server.celery import app as celery_app
+from hyself_server.celery import app as celery_app
 from chat.application.commands.realtime import execute_mark_conversation_read_command, execute_send_text_message_command
 from chat.application.queries.realtime import execute_chat_typing_query
 from ws.events import build_ws_event
@@ -28,6 +28,11 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
     - 上传任务订阅管理
     - 系统事件推送（如强制下线）
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.user_group_name: str | None = None
+        self.upload_task_groups: set[str] = set()
     
     async def connect(self):
         """处理 WebSocket 连接"""
@@ -328,7 +333,7 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
 
     async def disconnect(self, code):
         """处理 WebSocket 断开连接"""
-        if hasattr(self, "user_group_name"):
+        if self.user_group_name:
             await self.channel_layer.group_discard(self.user_group_name, self.channel_name)
         for group_name in list(self.upload_task_groups):
             await self.channel_layer.group_discard(group_name, self.channel_name)

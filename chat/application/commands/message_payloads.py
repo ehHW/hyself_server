@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import NotRequired, TypedDict, cast
 
-from bbot.models import AssetReference
+from hyself.models import AssetReference
 from chat.models import ChatMessage
-from utils.upload import media_url
+from hyself.utils.upload import media_url
 
 
 class ChatReplyPayload(TypedDict):
@@ -32,6 +32,7 @@ class ChatAssetPayload(TypedDict):
     stream_url: NotRequired[str]
     thumbnail_url: NotRequired[str]
     processing_status: NotRequired[str]
+    subtitle_tracks: NotRequired[list[dict[str, object]]]
 
 
 class ChatRecordItemPayload(TypedDict):
@@ -111,6 +112,7 @@ def build_asset_payload(*, chat_reference: AssetReference, source_reference: Ass
         "stream_url": str(video_processing.get("playlist_url") or ""),
         "thumbnail_url": str(video_processing.get("thumbnail_url") or ""),
         "processing_status": str(video_processing.get("status") or ""),
+        "subtitle_tracks": video_processing.get("subtitle_tracks") or [],
     }
 
 

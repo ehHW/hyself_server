@@ -7,7 +7,7 @@ import sys
 import django
 
 # 配置Django环境
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'bbot_server.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'hyself_server.settings')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 django.setup()
 

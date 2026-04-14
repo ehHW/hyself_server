@@ -1,8 +1,11 @@
+from unittest.mock import patch
+
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from user.models import Permission, Role, User
+from user.signals import DEFAULT_USER_ROLE_NAME, ensure_default_permissions_synced
 
 
 class UserDeleteProtectionTests(APITestCase):
@@ -38,6 +41,44 @@ class UserDeleteProtectionTests(APITestCase):
 		self.assertIsNotNone(deleted_target)
 		self.assertFalse(deleted_target.is_active)
 		self.assertIsNotNone(deleted_target.deleted_at)
+
+	def test_delete_user_notifies_force_logout_immediately(self):
+		self.client.force_authenticate(user=self.operator)
+		url = reverse("users-detail", kwargs={"pk": self.target_user.id})
+
+		with patch("user.views.notify_user_force_logout") as notify_force_logout:
+			response = self.client.delete(url)
+
+		self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+		notify_force_logout.assert_called_once_with(
+			self.target_user.id,
+			self.operator.username,
+		)
+
+
+class DefaultRoleSyncTests(APITestCase):
+	def setUp(self):
+		self.keep_permission, _ = Permission.objects.get_or_create(
+			code="chat.view_conversation",
+			defaults={"name": "查看会话"},
+		)
+		self.remove_permission, _ = Permission.objects.get_or_create(
+			code="chat.revoke_message",
+			defaults={"name": "撤回消息"},
+		)
+		ensure_default_permissions_synced()
+
+	def test_sync_does_not_override_existing_default_role_permissions(self):
+		default_role = Role.all_objects.get(name=DEFAULT_USER_ROLE_NAME)
+		default_role.permissions.set([self.keep_permission])
+
+		ensure_default_permissions_synced()
+
+		default_role.refresh_from_db()
+		self.assertEqual(
+			list(default_role.permissions.order_by("id").values_list("code", flat=True)),
+			["chat.view_conversation"],
+		)
 
 
 class UserSelfProtectionTests(APITestCase):

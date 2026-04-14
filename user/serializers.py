@@ -2,6 +2,7 @@ from django.contrib.auth import authenticate, password_validation
 from django.conf import settings
 from rest_framework import serializers
 
+from user.access_context import ensure_default_user_role, ensure_user_has_minimum_role
 from user.models import Permission, Role, User, UserPreference
 
 
@@ -15,8 +16,8 @@ def _filter_permission_queryset_for_request(queryset, request):
 
 
 class LoginSerializer(serializers.Serializer):
-    username = serializers.CharField(max_length=150)
-    password = serializers.CharField(max_length=128, write_only=True)
+    username = serializers.CharField(trim_whitespace=True)
+    password = serializers.CharField(write_only=True, trim_whitespace=False)
 
     def validate(self, attrs):
         raw_username = str(attrs.get("username", "")).strip()
@@ -112,28 +113,46 @@ class UserSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "last_login", "created_at", "updated_at", "deleted_at", "is_superuser", "is_staff"]
 
+    def validate(self, attrs):
+        roles = attrs.get("roles", serializers.empty)
+        if self.instance is not None and roles is not serializers.empty and len(list(roles)) == 0:
+            raise serializers.ValidationError({"role_ids": "每个用户至少需要保留一个角色"})
+        return attrs
+
     def _validate_roles(self, roles):
         if any(role.is_super_admin_role() for role in roles):
             raise serializers.ValidationError({"role_ids": "禁止分配超级管理员角色"})
 
+    def _resolve_create_roles(self, roles):
+        resolved_roles = list(roles)
+        if not resolved_roles:
+            resolved_roles = [ensure_default_user_role()]
+        self._validate_roles(resolved_roles)
+        return resolved_roles
+
+    def _validate_update_roles(self, roles):
+        resolved_roles = list(roles)
+        self._validate_roles(resolved_roles)
+        if not resolved_roles:
+            raise serializers.ValidationError({"role_ids": "每个用户至少需要保留一个角色"})
+        return resolved_roles
+
     def create(self, validated_data):
-        roles = validated_data.pop("roles", [])
-        self._validate_roles(roles)
+        roles = self._resolve_create_roles(validated_data.pop("roles", []))
         password = validated_data.pop("password", None)
         if not password:
             raise serializers.ValidationError({"password": "创建用户时必须提供密码"})
         user = User(**validated_data)
         user.set_password(password)
         user.save()
-        if roles:
-            user.roles.set(roles)
+        user.roles.set(roles)
         return user
 
     def update(self, instance, validated_data):
         roles = validated_data.pop("roles", None)
         password = validated_data.pop("password", None)
         if roles is not None:
-            self._validate_roles(roles)
+            roles = self._validate_update_roles(roles)
         for key, value in validated_data.items():
             setattr(instance, key, value)
         if password:
@@ -141,6 +160,8 @@ class UserSerializer(serializers.ModelSerializer):
         instance.save()
         if roles is not None:
             instance.roles.set(roles)
+        else:
+            ensure_user_has_minimum_role(instance)
         return instance
 
 

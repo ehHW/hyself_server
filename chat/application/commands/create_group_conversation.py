@@ -7,9 +7,7 @@ from chat.infrastructure.event_bus import notify_chat_conversation_updated
 
 @dataclass(frozen=True)
 class CreateGroupConversationCommandResult:
-    conversation_id: int
-    conversation_type: str
-    name: str
+    conversation: dict
 
 
 def execute_create_group_conversation_command(
@@ -30,7 +28,5 @@ def execute_create_group_conversation_command(
     for user in {owner, *member_users}:
         notify_chat_conversation_updated(user.id, serialize_conversation(conversation, user))
     return CreateGroupConversationCommandResult(
-        conversation_id=conversation.id,
-        conversation_type=conversation.type,
-        name=conversation.name,
+        conversation=serialize_conversation(conversation, owner),
     )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from chat.domain.access import get_conversation_access
+from chat.domain.access import get_conversation_access, user_can_stealth_inspect
 from chat.domain.serialization import serialize_message
 from chat.infrastructure.repositories import get_active_conversation, list_conversation_messages
 from chat.models import ChatConversation
@@ -21,13 +21,14 @@ def execute_conversation_messages_query(user, conversation_id: int, params: Conv
     if conversation is None:
         raise ChatConversation.DoesNotExist()
     access = get_conversation_access(user, conversation)
-    if access.member is not None and not access.member.show_in_list:
+    include_hidden_messages = user_can_stealth_inspect(user)
+    if access.access_mode == "member" and access.member is not None and not access.member.show_in_list:
         access.member.show_in_list = True
         access.member.save(update_fields=["show_in_list", "updated_at"])
     queryset = list_conversation_messages(
         conversation,
-        user_id=None if access.access_mode == "stealth_readonly" else user.id,
-        include_hidden=access.access_mode == "stealth_readonly",
+        user_id=None if include_hidden_messages else user.id,
+        include_hidden=include_hidden_messages,
     )
     if params.around_sequence:
         anchor_sequence = int(params.around_sequence)
@@ -58,6 +59,7 @@ def execute_conversation_messages_query(user, conversation_id: int, params: Conv
             "type": conversation.type,
             "access_mode": access.access_mode,
             "can_send_message": access.can_send_message,
+            "capabilities": access.capabilities.__dict__,
         },
         "cursor": {
             "before_sequence": first_sequence,

@@ -38,17 +38,18 @@ def execute_submit_friend_request_command(current_user, target_user_id: int, req
     if mode == "auto_accepted" and friendship and conversation:
         for actor in [current_user, target_user]:
             other_user = target_user if actor.id == current_user.id else current_user
+            serialized_conversation = serialize_conversation(conversation, actor)
             notify_chat_friendship_updated(
                 actor.id,
-                {"action": "accepted", "friend_user": user_brief(other_user), "conversation": {"id": conversation.id, "type": conversation.type, "show_in_list": True}},
+                {"action": "accepted", "friend_user": user_brief(other_user), "conversation": serialized_conversation},
             )
-            notify_chat_conversation_updated(actor.id, serialize_conversation(conversation, actor))
+            notify_chat_conversation_updated(actor.id, serialized_conversation)
         return SubmitFriendRequestCommandResult(
             payload={
                 "mode": mode,
                 "detail": "双方已自动成为好友",
                 "friendship": serialize_friendship(friendship, current_user),
-                "conversation": {"id": conversation.id, "type": conversation.type, "show_in_list": True},
+                "conversation": serialize_conversation(conversation, current_user),
             }
         )
     return SubmitFriendRequestCommandResult(payload={"mode": mode, "detail": "好友申请已发送", "request": serialize_friend_request(friend_request)})
@@ -64,11 +65,13 @@ def execute_handle_friend_request_command(current_user, request_id: int, action:
     response = {"detail": "好友申请已处理", "request": {"id": friend_request.id, "status": friend_request.status}}
     if friendship and conversation:
         response["friendship"] = {"id": friendship.id, "status": friendship.status}
-        response["conversation"] = {"id": conversation.id, "type": conversation.type}
-        notify_chat_friendship_updated(friend_request.from_user_id, {"action": "accepted", "friend_user": user_brief(friend_request.to_user), "conversation": {"id": conversation.id, "type": conversation.type, "show_in_list": True}})
-        notify_chat_friendship_updated(friend_request.to_user_id, {"action": "accepted", "friend_user": user_brief(friend_request.from_user), "conversation": {"id": conversation.id, "type": conversation.type, "show_in_list": True}})
-        notify_chat_conversation_updated(friend_request.from_user_id, serialize_conversation(conversation, friend_request.from_user))
-        notify_chat_conversation_updated(friend_request.to_user_id, serialize_conversation(conversation, friend_request.to_user))
+        from_conversation = serialize_conversation(conversation, friend_request.from_user)
+        to_conversation = serialize_conversation(conversation, friend_request.to_user)
+        response["conversation"] = serialize_conversation(conversation, current_user)
+        notify_chat_friendship_updated(friend_request.from_user_id, {"action": "accepted", "friend_user": user_brief(friend_request.to_user), "conversation": from_conversation})
+        notify_chat_friendship_updated(friend_request.to_user_id, {"action": "accepted", "friend_user": user_brief(friend_request.from_user), "conversation": to_conversation})
+        notify_chat_conversation_updated(friend_request.from_user_id, from_conversation)
+        notify_chat_conversation_updated(friend_request.to_user_id, to_conversation)
     return response
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
@@ -60,6 +62,69 @@ def _notify_group_conversation_to_active_members(conversation: ChatConversation)
         notify_chat_conversation_updated(member.user_id, serialize_conversation(conversation, member.user))
 
 
+def _disband_group_conversation(conversation: ChatConversation, operator_user) -> dict:
+    active_members = list_active_members(conversation)
+    now = timezone.now()
+    for member in active_members:
+        member.status = ChatConversationMember.Status.REMOVED
+        member.removed_at = now
+        member.removed_by = operator_user
+        member.show_in_list = False
+        member.save(update_fields=["status", "removed_at", "removed_by", "show_in_list", "updated_at"])
+        notify_chat_system_notice(
+            member.user_id,
+            "群聊已解散",
+            {"conversation_id": conversation.id, "notice_type": "group_disbanded"},
+        )
+    conversation.owner = None
+    conversation.status = ChatConversation.Status.DISBANDED
+    conversation.save(update_fields=["owner", "status", "updated_at"])
+    recalculate_member_count(conversation)
+    return {"detail": "群聊已解散", "conversation_id": conversation.id}
+
+
+def _ensure_target_member_manageable(actor_member: ChatConversationMember, target_member: ChatConversationMember) -> None:
+    if target_member.role == ChatConversationMember.Role.OWNER:
+        raise ValueError("不能操作群主")
+    if (
+        actor_member.role == ChatConversationMember.Role.ADMIN
+        and target_member.role == ChatConversationMember.Role.ADMIN
+    ):
+        raise PermissionError("群管理员不能操作另一位群管理员")
+
+
+def _transfer_group_owner_if_needed(
+    conversation: ChatConversation,
+    leaving_member: ChatConversationMember,
+) -> ChatConversationMember | None:
+    remaining_members = [
+        member for member in list_active_members(conversation) if member.user_id != leaving_member.user_id
+    ]
+    if not remaining_members:
+        conversation.owner = None
+        conversation.status = ChatConversation.Status.DISBANDED
+        conversation.save(update_fields=["owner", "status", "updated_at"])
+        return None
+
+    admin_candidates = [
+        member for member in remaining_members if member.role == ChatConversationMember.Role.ADMIN
+    ]
+    next_owner = random.choice(admin_candidates or remaining_members)
+    if next_owner.role != ChatConversationMember.Role.OWNER:
+        next_owner.role = ChatConversationMember.Role.OWNER
+        next_owner.save(update_fields=["role", "updated_at"])
+    conversation.owner = next_owner.user
+    conversation.status = ChatConversation.Status.ACTIVE
+    conversation.save(update_fields=["owner", "status", "updated_at"])
+    notify_chat_system_notice(
+        next_owner.user_id,
+        "你已成为新的群主",
+        {"conversation_id": conversation.id, "notice_type": "group_owner_transferred"},
+    )
+    _notify_group_conversation_to_active_members(conversation)
+    return next_owner
+
+
 def execute_invite_group_member_command(current_user, conversation_id: int, target_user_id: int) -> tuple[dict, int]:
     conversation = get_active_group_conversation(conversation_id)
     if conversation is None:
@@ -92,23 +157,25 @@ def execute_invite_group_member_command(current_user, conversation_id: int, targ
     }, 200
 
 
-def execute_apply_group_invitation_command(current_user, conversation_id: int, inviter_user_id: int) -> tuple[dict, int]:
+def execute_apply_group_invitation_command(current_user, conversation_id: int, inviter_user_id: int | None = None) -> tuple[dict, int]:
     conversation = get_active_group_conversation(conversation_id)
     if conversation is None:
         raise ChatConversation.DoesNotExist()
-    inviter_user = get_active_user(inviter_user_id)
-    if inviter_user is None:
-        raise User.DoesNotExist()
     if get_member(conversation, current_user.id, active_only=True):
         raise ValueError("你已在群聊中")
-    direct_conversation = get_active_direct_conversation_by_pair(build_pair_key(current_user.id, inviter_user.id))
-    invitation_exists = direct_conversation_has_group_invitation(
-        direct_conversation=direct_conversation,
-        inviter_user_id=inviter_user.id,
-        conversation_id=conversation.id,
-    )
-    if not invitation_exists:
-        raise PermissionError("该群邀请已失效")
+    inviter_user = None
+    if inviter_user_id is not None:
+        inviter_user = get_active_user(inviter_user_id)
+        if inviter_user is None:
+            raise User.DoesNotExist()
+        direct_conversation = get_active_direct_conversation_by_pair(build_pair_key(current_user.id, inviter_user.id))
+        invitation_exists = direct_conversation_has_group_invitation(
+            direct_conversation=direct_conversation,
+            inviter_user_id=inviter_user.id,
+            conversation_id=conversation.id,
+        )
+        if not invitation_exists:
+            raise PermissionError("该群邀请已失效")
     pending_request = get_pending_group_join_request(conversation, current_user)
     if pending_request is not None:
         return {
@@ -120,7 +187,7 @@ def execute_apply_group_invitation_command(current_user, conversation_id: int, i
         join_request = create_pending_group_application_request(
             conversation,
             current_user,
-            inviter=current_user,
+            inviter=inviter_user or current_user,
         )
         for admin_user_id in _get_group_admin_user_ids(conversation):
             notify_chat_group_join_request_updated(admin_user_id, _serialize_join_request_event(join_request))
@@ -147,12 +214,58 @@ def execute_leave_group_conversation_command(current_user, conversation_id: int)
     member = get_member(conversation, current_user.id, active_only=True)
     if member is None:
         raise ValueError("当前不在该群聊中")
+    was_owner = member.role == ChatConversationMember.Role.OWNER
+    if was_owner:
+        member.role = ChatConversationMember.Role.MEMBER
     member.status = ChatConversationMember.Status.LEFT
     member.left_at = timezone.now()
     member.show_in_list = False
-    member.save(update_fields=["status", "left_at", "show_in_list", "updated_at"])
+    member.save(update_fields=["role", "status", "left_at", "show_in_list", "updated_at"])
+    if was_owner:
+        _transfer_group_owner_if_needed(conversation, member)
     recalculate_member_count(conversation)
     return {"detail": "已退出群聊", "conversation_id": conversation.id}
+
+
+def execute_transfer_group_owner_command(current_user, conversation_id: int, target_user_id: int) -> dict:
+    conversation = get_active_group_conversation(conversation_id)
+    if conversation is None:
+        raise ChatConversation.DoesNotExist()
+    actor_member = get_member(conversation, current_user.id, active_only=True)
+    if actor_member is None or actor_member.role != ChatConversationMember.Role.OWNER:
+        raise PermissionError("仅群主可转让群主")
+    target_member = get_member(conversation, target_user_id, active_only=True)
+    if target_member is None:
+        raise ChatConversationMember.DoesNotExist()
+    if target_member.role == ChatConversationMember.Role.OWNER:
+        raise ValueError("目标成员已经是群主")
+    actor_member.role = ChatConversationMember.Role.ADMIN
+    target_member.role = ChatConversationMember.Role.OWNER
+    actor_member.save(update_fields=["role", "updated_at"])
+    target_member.save(update_fields=["role", "updated_at"])
+    conversation.owner = target_member.user
+    conversation.save(update_fields=["owner", "updated_at"])
+    notify_chat_system_notice(
+        target_member.user_id,
+        "你已成为新的群主",
+        {"conversation_id": conversation.id, "notice_type": "group_owner_transferred"},
+    )
+    _notify_group_conversation_to_active_members(conversation)
+    return {
+        "detail": "群主已转让",
+        "conversation_id": conversation.id,
+        "target_user_id": target_user_id,
+    }
+
+
+def execute_disband_group_conversation_command(current_user, conversation_id: int) -> dict:
+    conversation = get_active_group_conversation(conversation_id)
+    if conversation is None:
+        raise ChatConversation.DoesNotExist()
+    actor_member = get_member(conversation, current_user.id, active_only=True)
+    if actor_member is None or actor_member.role != ChatConversationMember.Role.OWNER:
+        raise PermissionError("仅群主可解散群聊")
+    return _disband_group_conversation(conversation, current_user)
 
 
 def execute_remove_group_member_command(current_user, conversation_id: int, user_id: int) -> dict:
@@ -166,8 +279,7 @@ def execute_remove_group_member_command(current_user, conversation_id: int, user
     target_member = get_member(conversation, user_id, active_only=True)
     if target_member is None:
         raise ChatConversationMember.DoesNotExist()
-    if target_member.role == ChatConversationMember.Role.OWNER:
-        raise ValueError("不能移除群主")
+    _ensure_target_member_manageable(actor_member, target_member)
     target_member.status = ChatConversationMember.Status.REMOVED
     target_member.removed_at = timezone.now()
     target_member.removed_by = current_user
@@ -206,8 +318,7 @@ def execute_mute_group_member_command(current_user, conversation_id: int, user_i
     target_member = get_member(conversation, user_id, active_only=True)
     if target_member is None:
         raise ChatConversationMember.DoesNotExist()
-    if target_member.role == ChatConversationMember.Role.OWNER:
-        raise ValueError("不能禁言群主")
+    _ensure_target_member_manageable(actor_member, target_member)
     if mute_minutes <= 0:
         target_member.mute_until = None
         target_member.mute_reason = ""
@@ -224,9 +335,8 @@ def execute_update_group_config_command(current_user, conversation_id: int, data
     if conversation is None or not hasattr(conversation, "group_config"):
         raise ChatConversation.DoesNotExist()
     actor_member = get_member(conversation, current_user.id, active_only=True)
-    if actor_member is None:
-        raise PermissionError("当前无权操作该群聊")
-    require_group_member_manager(actor_member)
+    if actor_member is None or actor_member.role != ChatConversationMember.Role.OWNER:
+        raise PermissionError("仅群主可修改群资料和群设置")
     conversation_fields = []
     if "name" in data:
         conversation.name = data["name"]

@@ -14,6 +14,7 @@ class ChatSearchAPIView(APIView):
             ChatSearchQueryParams(
                 keyword=str(request.query_params.get("keyword", "")).strip(),
                 limit=max(1, min(20, int(request.query_params.get("limit", 5)))),
+                scope=str(request.query_params.get("scope", "connected")).strip(),
             ),
         )
         return Response(payload)

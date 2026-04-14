@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from bbot.models import AssetReference
+from hyself.models import AssetReference
 
 
 class OpenDirectConversationSerializer(serializers.Serializer):

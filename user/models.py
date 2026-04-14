@@ -1,10 +1,13 @@
 from django.contrib.auth.models import AbstractUser
+from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.db import models
 from django.utils import timezone
 
 from utils.soft_delete import ActiveUserManager, AllUsersManager, SoftDeleteModel
 
 SUPER_ADMIN_ROLE_NAME = "超级管理员"
+SYSTEM_ADMIN_ROLE_NAME = "系统管理员"
+DEFAULT_USER_ROLE_NAME = "普通用户"
 
 
 class Permission(SoftDeleteModel):
@@ -37,7 +40,16 @@ class Role(SoftDeleteModel):
 
 
 class User(SoftDeleteModel, AbstractUser):
-	display_name = models.CharField(max_length=100, blank=True, default="", verbose_name="显示名")
+	username_validator = UnicodeUsernameValidator()
+	username = models.CharField(
+		"username",
+		max_length=255,
+		unique=True,
+		help_text="Required. Letters, digits and @/./+/-/_ only.",
+		validators=[username_validator],
+		error_messages={"unique": "A user with that username already exists."},
+	)
+	display_name = models.TextField(blank=True, default="", verbose_name="显示名")
 	avatar = models.CharField(max_length=500, blank=True, default="", verbose_name="头像")
 	phone_number = models.CharField(max_length=30, blank=True, default="", verbose_name="电话号码")
 	roles = models.ManyToManyField(Role, blank=True, related_name="users", verbose_name="用户角色")

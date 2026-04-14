@@ -10,11 +10,93 @@ from chat.models import ChatConversation, ChatConversationMember
 
 
 @dataclass
+class ConversationCapabilities:
+    can_view: bool
+    can_open: bool
+    can_read_history: bool
+    can_send_message: bool
+    can_mark_read: bool
+    can_view_members: bool
+    can_manage_members: bool
+    can_manage_group_settings: bool
+    can_invite_members: bool
+    can_join: bool
+
+
+@dataclass
 class ConversationAccess:
     conversation: ChatConversation
     member: ChatConversationMember | None
     access_mode: str
     can_send_message: bool
+    capabilities: ConversationCapabilities
+
+
+def serialize_conversation_capabilities(capabilities: ConversationCapabilities) -> dict:
+    return {
+        "can_view": capabilities.can_view,
+        "can_open": capabilities.can_open,
+        "can_read_history": capabilities.can_read_history,
+        "can_send_message": capabilities.can_send_message,
+        "can_mark_read": capabilities.can_mark_read,
+        "can_view_members": capabilities.can_view_members,
+        "can_manage_members": capabilities.can_manage_members,
+        "can_manage_group_settings": capabilities.can_manage_group_settings,
+        "can_invite_members": capabilities.can_invite_members,
+        "can_join": capabilities.can_join,
+    }
+
+
+def build_conversation_capabilities(conversation: ChatConversation, member: ChatConversationMember | None, *, access_mode: str, can_send_message: bool) -> ConversationCapabilities:
+    is_member_access = access_mode == "member" and member is not None
+    is_group = conversation.type == ChatConversation.Type.GROUP
+    can_manage_members = bool(
+        is_group
+        and is_member_access
+        and member.role in {ChatConversationMember.Role.OWNER, ChatConversationMember.Role.ADMIN}
+    )
+    can_manage_group_settings = bool(
+        is_group
+        and is_member_access
+        and member.role == ChatConversationMember.Role.OWNER
+    )
+    allow_member_invite = bool(
+        is_group
+        and is_member_access
+        and hasattr(conversation, "group_config")
+        and conversation.group_config.allow_member_invite
+    )
+    can_open = access_mode != "discover_preview"
+    can_read_history = access_mode != "discover_preview"
+    return ConversationCapabilities(
+        can_view=True,
+        can_open=can_open,
+        can_read_history=can_read_history,
+        can_send_message=can_send_message,
+        can_mark_read=is_member_access,
+        can_view_members=is_member_access,
+        can_manage_members=can_manage_members,
+        can_manage_group_settings=can_manage_group_settings,
+        can_invite_members=can_manage_members or allow_member_invite,
+        can_join=access_mode == "discover_preview",
+    )
+
+
+def build_discover_preview_capabilities() -> ConversationCapabilities:
+    return build_conversation_capabilities(
+        ChatConversation(type=ChatConversation.Type.GROUP),
+        None,
+        access_mode="discover_preview",
+        can_send_message=False,
+    )
+
+
+def get_conversation_denied_detail(conversation: ChatConversation, user_id: int, *, action: str = "访问该会话") -> str:
+    if conversation.type == ChatConversation.Type.GROUP:
+        member = get_member(conversation, user_id, active_only=False)
+        base = "你已退出该群聊" if member and member.status == ChatConversationMember.Status.LEFT else "你不是该群成员"
+        return base if not action else f"{base}，无法{action}"
+    return "当前无权访问该会话" if action == "访问该会话" else f"当前无权{action}"
 
 
 def get_member(conversation: ChatConversation, user_id: int, active_only: bool = False) -> ChatConversationMember | None:
@@ -42,12 +124,50 @@ def get_conversation_access(user, conversation: ChatConversation) -> Conversatio
         can_send = conversation.status == ChatConversation.Status.ACTIVE and not mute_active
         if conversation.type == ChatConversation.Type.GROUP and hasattr(conversation, "group_config") and conversation.group_config.mute_all and member.role != ChatConversationMember.Role.OWNER:
             can_send = False
-        return ConversationAccess(conversation=conversation, member=member, access_mode="member", can_send_message=can_send)
+        return ConversationAccess(
+            conversation=conversation,
+            member=member,
+            access_mode="member",
+            can_send_message=can_send,
+            capabilities=build_conversation_capabilities(
+                conversation,
+                member,
+                access_mode="member",
+                can_send_message=can_send,
+            ),
+        )
+
+    if conversation.type == ChatConversation.Type.GROUP:
+        former_member = get_member(conversation, user.id, active_only=False)
+        if former_member and former_member.status in {ChatConversationMember.Status.LEFT, ChatConversationMember.Status.REMOVED}:
+            return ConversationAccess(
+                conversation=conversation,
+                member=former_member,
+                access_mode="former_member_readonly",
+                can_send_message=False,
+                capabilities=build_conversation_capabilities(
+                    conversation,
+                    former_member,
+                    access_mode="former_member_readonly",
+                    can_send_message=False,
+                ),
+            )
 
     if user_can_stealth_inspect(user):
-        return ConversationAccess(conversation=conversation, member=None, access_mode="stealth_readonly", can_send_message=False)
+        return ConversationAccess(
+            conversation=conversation,
+            member=None,
+            access_mode="stealth_readonly",
+            can_send_message=False,
+            capabilities=build_conversation_capabilities(
+                conversation,
+                None,
+                access_mode="stealth_readonly",
+                can_send_message=False,
+            ),
+        )
 
-    raise PermissionDenied("当前无权访问该会话")
+    raise PermissionDenied(get_conversation_denied_detail(conversation, user.id))
 
 
 def get_visible_conversations_queryset(user):

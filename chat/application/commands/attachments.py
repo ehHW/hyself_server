@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
+from chat.auth.permissions import ensure_chat_permission
 from chat.application.commands.delivery import build_message_delivery_payloads, emit_message_delivery_events
 from chat.application.commands.message_payloads import build_asset_payload, build_reply_payload_from_message
-from bbot.application.services.asset_references import create_chat_attachment_asset_reference
-from bbot.models import Asset, AssetReference
-from chat.domain.access import get_conversation_access
+from hyself.application.services.asset_references import create_chat_attachment_asset_reference
+from hyself.models import Asset, AssetReference
+from chat.domain.access import get_conversation_access, get_conversation_denied_detail
 from chat.domain.friendships import get_active_friendship_between
 from chat.domain.messaging import create_message
 from chat.infrastructure.repositories import get_active_conversation, get_asset_reference_with_asset, get_conversation_message, get_other_active_member
 from chat.models import ChatConversation, ChatMessage
-from utils.upload import media_url
+from hyself.utils.upload import media_url
 
 
 def _resolve_asset_message_type(media_type: str) -> str:
@@ -38,11 +39,14 @@ def execute_send_asset_message_command(
     extra_payload: dict | None = None,
     emit_events: bool = True,
 ) -> dict:
+    ensure_chat_permission(user, "chat.send_attachment", "当前角色无发送附件权限")
     conversation = get_active_conversation(conversation_id)
     if conversation is None:
         raise ValidationError({"detail": "会话不存在"})
 
     access = get_conversation_access(user, conversation)
+    if access.access_mode == "former_member_readonly":
+        raise PermissionDenied(get_conversation_denied_detail(conversation, user.id, action="发送新消息"))
     if access.access_mode != "member" or not access.can_send_message:
         raise PermissionDenied("当前无权发送消息")
 

@@ -7,6 +7,7 @@ from chat.infrastructure.repositories.conversations import (
     list_admin_conversations,
     list_visible_conversations,
     refresh_conversation,
+    search_discover_group_conversations,
 )
 from chat.infrastructure.repositories.friendships import (
     get_active_user,
@@ -14,6 +15,8 @@ from chat.infrastructure.repositories.friendships import (
     get_friendship_by_pair,
     list_friend_requests_for_user,
     list_friendships_for_user,
+    search_active_users,
+    search_friend_users,
 )
 from chat.infrastructure.repositories.groups import (
     create_pending_group_application_request,
@@ -76,4 +79,7 @@ __all__ = [
     "refresh_conversation",
     "refresh_member",
     "reveal_hidden_members",
+    "search_active_users",
+    "search_discover_group_conversations",
+    "search_friend_users",
 ]

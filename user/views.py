@@ -1,4 +1,4 @@
-from auth.permissions import AuthenticatedPermission as IsAuthenticated
+from auth.permissions import AuthenticatedPermission as IsAuthenticated, raise_permission_denied
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.decorators import api_view, permission_classes
@@ -6,10 +6,12 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
-from django.db.models import Q
+from django.db.models import Count, Q
 
+from user.access_context import build_permission_context_payload, ensure_default_user_role, ensure_user_has_minimum_role
 from user.models import Permission, Role, User, SUPER_ADMIN_ROLE_NAME
-from user.permissions import ActionPermission
+from user.auth.permissions import ActionPermission
+from user.signals import ensure_default_permissions_synced
 from user.serializers import (
 	ChangePasswordSerializer,
 	LoginSerializer,
@@ -21,7 +23,7 @@ from user.serializers import (
 	SUPER_ADMIN_ONLY_PERMISSION_CODES,
 )
 from utils.audit import write_audit_log
-from ws.events import notify_user_force_logout
+from ws.events import notify_user_force_logout, notify_user_permission_updated
 
 
 CORE_PERMISSION_CODE_PREFIXES = ("user.", "audit.")
@@ -73,6 +75,7 @@ def _is_core_permission_code(code: str) -> bool:
 def ensure_super_admin_role() -> None:
 	"""确保系统存在超级管理员角色并绑定所有超管用户。"""
 
+	ensure_default_permissions_synced()
 	role = Role.all_objects.filter(name=SUPER_ADMIN_ROLE_NAME).first()
 	if role is None:
 		role = Role.all_objects.create(
@@ -90,10 +93,20 @@ def ensure_super_admin_role() -> None:
 		user.roles.add(role)
 
 
+def ensure_default_role() -> None:
+	ensure_default_user_role()
+
+
+def notify_users_permission_context_changed(user_ids: list[int] | set[int], *, reason: str) -> None:
+	for user_id in {int(item) for item in user_ids if item}:
+		notify_user_permission_updated(user_id, reason=reason)
+
+
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def login_view(request):
 	ensure_super_admin_role()
+	ensure_default_role()
 	serializer = LoginSerializer(data=request.data)
 	try:
 		serializer.is_valid(raise_exception=True)
@@ -103,10 +116,11 @@ def login_view(request):
 			"login",
 			"failed",
 			detail="登录失败",
-			metadata={"username": str(request.data.get("username", ""))[:150]},
+			metadata={"username": str(request.data.get("username", ""))},
 		)
 		raise
 	user = serializer.validated_data["user"]
+	ensure_user_has_minimum_role(user)
 	write_audit_log(request, "login", "success", detail="登录成功", target=user)
 
 	refresh = RefreshToken.for_user(user)
@@ -123,6 +137,8 @@ def login_view(request):
 @permission_classes([IsAuthenticated])
 def profile_view(request):
 	ensure_super_admin_role()
+	ensure_default_role()
+	ensure_user_has_minimum_role(request.user)
 	if request.method == "PATCH":
 		serializer = ProfileUpdateSerializer(request.user, data=request.data, partial=True)
 		serializer.is_valid(raise_exception=True)
@@ -130,6 +146,15 @@ def profile_view(request):
 		write_audit_log(request, "update", "success", detail="更新个人资料成功", target=request.user)
 		return Response(ProfileSerializer(request.user).data)
 	return Response(ProfileSerializer(request.user).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def permission_context_view(request):
+	ensure_super_admin_role()
+	ensure_default_role()
+	ensure_user_has_minimum_role(request.user)
+	return Response(build_permission_context_payload(request.user))
 
 
 @api_view(["POST"])
@@ -160,9 +185,11 @@ class UserViewSet(viewsets.ModelViewSet):
 	def create(self, request, *args, **kwargs):
 		if not request.user.is_superuser:
 			write_audit_log(request, "create", "blocked", detail="非超级管理员尝试创建用户")
-			return Response({"detail": "仅超级管理员可创建用户"}, status=status.HTTP_403_FORBIDDEN)
+			raise_permission_denied()
 		response = super().create(request, *args, **kwargs)
 		target = User.objects.filter(pk=response.data.get("id")).first() if isinstance(response.data, dict) else None
+		if target is not None:
+			notify_users_permission_context_changed([target.id], reason="user_created")
 		write_audit_log(request, "create", "success", detail="创建用户成功", target=target)
 		return response
 
@@ -190,6 +217,7 @@ class UserViewSet(viewsets.ModelViewSet):
 		if self_check is not None:
 			return self_check
 		response = super().update(request, *args, **kwargs)
+		notify_users_permission_context_changed([target.id], reason="user_roles_updated")
 		write_audit_log(request, "update", "success", detail="更新用户成功", target=target)
 		return response
 
@@ -202,6 +230,7 @@ class UserViewSet(viewsets.ModelViewSet):
 		if self_check is not None:
 			return self_check
 		response = super().partial_update(request, *args, **kwargs)
+		notify_users_permission_context_changed([target.id], reason="user_roles_updated")
 		write_audit_log(request, "update", "success", detail="部分更新用户成功", target=target)
 		return response
 
@@ -213,12 +242,14 @@ class UserViewSet(viewsets.ModelViewSet):
 		if target.id == request.user.id:
 			write_audit_log(request, "protect_block", "blocked", detail="尝试删除当前登录用户", target=target)
 			return Response({"detail": "不能删除当前登录用户"}, status=status.HTTP_400_BAD_REQUEST)
+		notify_user_force_logout(target.id, request.user.username)
 		response = super().destroy(request, *args, **kwargs)
 		write_audit_log(request, "delete", "success", detail="删除用户成功", target=target)
 		return response
 
 	def get_queryset(self):
 		ensure_super_admin_role()
+		ensure_default_role()
 		queryset = super().get_queryset()
 		keyword = self.request.query_params.get("keyword", "").strip()
 		created_from = self.request.query_params.get("created_from", "").strip()
@@ -239,7 +270,7 @@ class UserViewSet(viewsets.ModelViewSet):
 	def kickout(self, request, pk=None):
 		if not request.user.is_superuser:
 			write_audit_log(request, "kickout", "blocked", detail="非超级管理员尝试踢人下线")
-			return Response({"detail": "仅超级管理员可踢人下线"}, status=status.HTTP_403_FORBIDDEN)
+			raise_permission_denied()
 
 		target = self.get_object()
 		if target.has_super_admin_role():
@@ -269,6 +300,7 @@ class RoleViewSet(viewsets.ModelViewSet):
 
 	def get_queryset(self):
 		ensure_super_admin_role()
+		ensure_default_role()
 		queryset = super().get_queryset()
 		if not self.request.user.is_superuser:
 			queryset = queryset.exclude(permissions__code__in=SUPER_ADMIN_ONLY_PERMISSION_CODES)
@@ -285,45 +317,65 @@ class RoleViewSet(viewsets.ModelViewSet):
 	def create(self, request, *args, **kwargs):
 		requested_permission_ids = request.data.get("permission_ids") or []
 		if not request.user.is_superuser and Permission.objects.filter(id__in=requested_permission_ids, code__in=SUPER_ADMIN_ONLY_PERMISSION_CODES).exists():
-			return Response({"detail": "该权限仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+			raise_permission_denied()
 		response = super().create(request, *args, **kwargs)
 		target = Role.objects.filter(pk=response.data.get("id")).first() if isinstance(response.data, dict) else None
+		if target is not None:
+			notify_users_permission_context_changed(
+				User.objects.filter(roles=target).values_list("id", flat=True),
+				reason="role_permissions_updated",
+			)
 		write_audit_log(request, "create", "success", detail="创建角色成功", target=target)
 		return response
 
 	def update(self, request, *args, **kwargs):
 		role = self.get_object()
+		affected_user_ids = list(User.objects.filter(roles=role).values_list("id", flat=True))
 		if not request.user.is_superuser and role.permissions.filter(code__in=SUPER_ADMIN_ONLY_PERMISSION_CODES).exists():
-			return Response({"detail": "该角色仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+			raise_permission_denied()
 		if role.is_super_admin_role():
 			write_audit_log(request, "protect_block", "blocked", detail="尝试编辑超级管理员角色", target=role)
 			return Response({"detail": "超级管理员角色禁止编辑"}, status=status.HTTP_403_FORBIDDEN)
 		response = super().update(request, *args, **kwargs)
+		notify_users_permission_context_changed(affected_user_ids, reason="role_permissions_updated")
 		write_audit_log(request, "update", "success", detail="更新角色成功", target=role)
 		return response
 
 	def partial_update(self, request, *args, **kwargs):
 		role = self.get_object()
+		affected_user_ids = list(User.objects.filter(roles=role).values_list("id", flat=True))
 		if not request.user.is_superuser and role.permissions.filter(code__in=SUPER_ADMIN_ONLY_PERMISSION_CODES).exists():
-			return Response({"detail": "该角色仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+			raise_permission_denied()
 		if role.is_super_admin_role():
 			write_audit_log(request, "protect_block", "blocked", detail="尝试部分编辑超级管理员角色", target=role)
 			return Response({"detail": "超级管理员角色禁止编辑"}, status=status.HTTP_403_FORBIDDEN)
 		response = super().partial_update(request, *args, **kwargs)
+		notify_users_permission_context_changed(affected_user_ids, reason="role_permissions_updated")
 		write_audit_log(request, "update", "success", detail="部分更新角色成功", target=role)
 		return response
 
 	def destroy(self, request, *args, **kwargs):
 		role = self.get_object()
+		affected_user_ids = list(User.objects.filter(roles=role).values_list("id", flat=True))
 		if not request.user.is_superuser and role.permissions.filter(code__in=SUPER_ADMIN_ONLY_PERMISSION_CODES).exists():
-			return Response({"detail": "该角色仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+			raise_permission_denied()
 		if role.is_super_admin_role():
 			write_audit_log(request, "protect_block", "blocked", detail="尝试删除超级管理员角色", target=role)
 			return Response({"detail": "超级管理员角色禁止删除"}, status=status.HTTP_403_FORBIDDEN)
 		if request.user.roles.filter(id=role.id).exists():
 			write_audit_log(request, "protect_block", "blocked", detail="尝试删除当前用户正在使用的角色", target=role)
 			return Response({"detail": "不能删除当前用户正在使用的角色"}, status=status.HTTP_400_BAD_REQUEST)
+		orphan_usernames = list(
+			User.objects.filter(roles=role)
+			.annotate(role_count=Count("roles"))
+			.filter(role_count__lte=1)
+			.values_list("username", flat=True)[:5]
+		)
+		if orphan_usernames:
+			write_audit_log(request, "protect_block", "blocked", detail="尝试删除导致用户失去全部角色的角色", target=role)
+			return Response({"detail": f"删除后将导致以下用户失去角色：{', '.join(orphan_usernames)}"}, status=status.HTTP_400_BAD_REQUEST)
 		response = super().destroy(request, *args, **kwargs)
+		notify_users_permission_context_changed(affected_user_ids, reason="role_deleted")
 		write_audit_log(request, "delete", "success", detail="删除角色成功", target=role)
 		return response
 
@@ -358,36 +410,45 @@ class PermissionViewSet(viewsets.ModelViewSet):
 		permission_code = str(request.data.get("code", "")).strip()
 		if (_is_core_permission_code(permission_code) or permission_code in SUPER_ADMIN_ONLY_PERMISSION_CODES) and not request.user.is_superuser:
 			write_audit_log(request, "protect_block", "blocked", detail="非超级管理员尝试创建核心权限", metadata={"code": permission_code})
-			return Response({"detail": "核心权限仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+			raise_permission_denied("核心权限仅超级管理员可操作")
 		response = super().create(request, *args, **kwargs)
 		target = Permission.objects.filter(pk=response.data.get("id")).first() if isinstance(response.data, dict) else None
+		if target is not None:
+			affected_user_ids = User.objects.filter(roles__permissions=target).distinct().values_list("id", flat=True)
+			notify_users_permission_context_changed(affected_user_ids, reason="permission_created")
 		write_audit_log(request, "create", "success", detail="创建权限成功", target=target)
 		return response
 
 	def update(self, request, *args, **kwargs):
 		target = self.get_object()
+		affected_user_ids = list(User.objects.filter(roles__permissions=target).distinct().values_list("id", flat=True))
 		if (_is_core_permission_code(target.code) or target.code in SUPER_ADMIN_ONLY_PERMISSION_CODES) and not request.user.is_superuser:
 			write_audit_log(request, "protect_block", "blocked", detail="非超级管理员尝试更新核心权限", target=target)
-			return Response({"detail": "核心权限仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+			raise_permission_denied("核心权限仅超级管理员可操作")
 		response = super().update(request, *args, **kwargs)
+		notify_users_permission_context_changed(affected_user_ids, reason="permission_updated")
 		write_audit_log(request, "update", "success", detail="更新权限成功", target=target)
 		return response
 
 	def partial_update(self, request, *args, **kwargs):
 		target = self.get_object()
+		affected_user_ids = list(User.objects.filter(roles__permissions=target).distinct().values_list("id", flat=True))
 		if (_is_core_permission_code(target.code) or target.code in SUPER_ADMIN_ONLY_PERMISSION_CODES) and not request.user.is_superuser:
 			write_audit_log(request, "protect_block", "blocked", detail="非超级管理员尝试部分更新核心权限", target=target)
-			return Response({"detail": "核心权限仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+			raise_permission_denied("核心权限仅超级管理员可操作")
 		response = super().partial_update(request, *args, **kwargs)
+		notify_users_permission_context_changed(affected_user_ids, reason="permission_updated")
 		write_audit_log(request, "update", "success", detail="部分更新权限成功", target=target)
 		return response
 
 	def destroy(self, request, *args, **kwargs):
 		target = self.get_object()
+		affected_user_ids = list(User.objects.filter(roles__permissions=target).distinct().values_list("id", flat=True))
 		if (_is_core_permission_code(target.code) or target.code in SUPER_ADMIN_ONLY_PERMISSION_CODES) and not request.user.is_superuser:
 			write_audit_log(request, "protect_block", "blocked", detail="非超级管理员尝试删除核心权限", target=target)
-			return Response({"detail": "核心权限仅超级管理员可操作"}, status=status.HTTP_403_FORBIDDEN)
+			raise_permission_denied("核心权限仅超级管理员可操作")
 		response = super().destroy(request, *args, **kwargs)
+		notify_users_permission_context_changed(affected_user_ids, reason="permission_deleted")
 		write_audit_log(request, "delete", "success", detail="删除权限成功", target=target)
 		return response
 

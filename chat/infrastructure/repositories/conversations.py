@@ -27,6 +27,18 @@ def get_active_direct_conversation_by_pair(pair_key: str) -> ChatConversation | 
     ).first()
 
 
+def search_discover_group_conversations(*, keyword: str, limit: int):
+    return (
+        ChatConversation.objects.filter(
+            status=ChatConversation.Status.ACTIVE,
+            type=ChatConversation.Type.GROUP,
+            name__icontains=keyword,
+        )
+        .select_related("owner", "group_config")
+        .order_by("name", "id")[:limit]
+    )
+
+
 def list_visible_conversations(*, visible_ids: list[int] | set[int], category: str = "all", keyword: str = ""):
     queryset = ChatConversation.objects.filter(status=ChatConversation.Status.ACTIVE).select_related("owner", "group_config")
     queryset = queryset.filter(id__in=visible_ids)

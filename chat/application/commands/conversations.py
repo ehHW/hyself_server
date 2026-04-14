@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chat.domain.access import get_member
+from chat.domain.access import get_conversation_denied_detail, get_member
 from chat.domain.member_settings import get_member_preferences, update_member_preferences
 from chat.domain.serialization import serialize_conversation
 from chat.infrastructure.repositories import get_active_conversation
@@ -14,7 +14,7 @@ def execute_hide_conversation_command(current_user, conversation_id: int) -> dic
         raise ChatConversation.DoesNotExist()
     member = get_member(conversation, current_user.id, active_only=True)
     if member is None:
-        raise PermissionError("当前无权操作该会话")
+        raise PermissionError(get_conversation_denied_detail(conversation, current_user.id, action="隐藏该会话"))
     member.show_in_list = False
     member.save(update_fields=["show_in_list", "updated_at"])
     notify_chat_conversation_updated(current_user.id, serialize_conversation(conversation, current_user))
@@ -27,7 +27,7 @@ def execute_update_conversation_preference_command(current_user, conversation_id
         raise ChatConversation.DoesNotExist()
     member = get_member(conversation, current_user.id, active_only=True)
     if member is None:
-        raise PermissionError("当前无权操作该会话")
+        raise PermissionError(get_conversation_denied_detail(conversation, current_user.id, action="更新会话设置"))
     update_member_preferences(member, mute_notifications=mute_notifications, group_nickname=group_nickname)
     payload = serialize_conversation(conversation, current_user)
     notify_chat_conversation_updated(current_user.id, payload)
@@ -40,7 +40,7 @@ def execute_toggle_conversation_pin_command(current_user, conversation_id: int, 
         raise ChatConversation.DoesNotExist()
     member = get_member(conversation, current_user.id, active_only=True)
     if member is None:
-        raise PermissionError("当前无权操作该会话")
+        raise PermissionError(get_conversation_denied_detail(conversation, current_user.id, action="置顶该会话"))
     member.is_pinned = is_pinned
     member.save(update_fields=["is_pinned", "updated_at"])
     payload = serialize_conversation(conversation, current_user)

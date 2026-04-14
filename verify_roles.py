@@ -6,7 +6,7 @@ import os
 import sys
 import django
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'bbot_server.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'hyself_server.settings')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 django.setup()
 

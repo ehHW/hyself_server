@@ -2,32 +2,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from django.contrib.auth import get_user_model
-from django.db.models import Q
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from chat.domain.access import get_searchable_conversation_ids, user_can_review_all_messages, user_can_stealth_inspect
 from chat.domain.common import to_serializable_datetime, user_brief
 from chat.domain.preferences import get_or_create_user_preference
-from chat.domain.serialization import serialize_conversation, serialize_message
+from chat.domain.serialization import (
+    serialize_conversation,
+    serialize_discover_preview_conversation,
+    serialize_message,
+)
 from chat.infrastructure.repositories import (
     get_active_direct_conversation_by_pair,
     get_active_member,
     list_active_conversations_by_ids,
     list_admin_conversations,
     list_admin_messages,
-    search_messages_in_conversations,
 )
-from chat.models import ChatConversation, ChatMessage, build_pair_key
-
-
-User = get_user_model()
+from chat.infrastructure.search_adapter import load_chat_search_materials
+from chat.models import ChatConversation, ChatFriendship, ChatMessage, build_pair_key
 
 
 @dataclass(frozen=True)
 class ChatSearchQueryParams:
     keyword: str
     limit: int = 5
+    scope: str = "connected"
 
 
 @dataclass(frozen=True)
@@ -47,18 +47,30 @@ def execute_chat_search_query(user, params: ChatSearchQueryParams) -> dict:
     if not keyword:
         raise ValidationError({"detail": "搜索关键字不能为空"})
     limit = max(1, min(20, int(params.limit)))
+    scope = str(params.scope or "connected").strip().lower() or "connected"
+    if scope not in {"connected", "discover", "audit"}:
+        scope = "connected"
     visible_ids = get_searchable_conversation_ids(user, include_hidden=True)
-    conversations = list_active_conversations_by_ids(visible_ids, keyword=keyword, limit=limit)
-    users = User.objects.filter(Q(username__icontains=keyword) | Q(display_name__icontains=keyword), deleted_at__isnull=True, is_active=True)[:limit]
     include_hidden_messages = user_can_stealth_inspect(user)
-    messages = search_messages_in_conversations(
-        visible_ids=visible_ids,
+    search_materials = load_chat_search_materials(
+        user=user,
         keyword=keyword,
+        scope=scope,
         limit=limit,
-        user_id=None if include_hidden_messages else user.id,
-        include_hidden=include_hidden_messages,
+        visible_ids=visible_ids,
+        include_hidden_messages=include_hidden_messages,
     )
-    conversation_payload_map = {item.id: serialize_conversation(item, user) for item in conversations}
+    conversations = search_materials.conversations
+    users = search_materials.users
+    conversation_payload_map = {
+        item.id: (
+            serialize_discover_preview_conversation(item)
+            if scope == "discover"
+            else serialize_conversation(item, user)
+        )
+        for item in conversations
+    }
+    messages = search_materials.messages
     message_conversation_ids = {item.conversation_id for item in messages}
     if message_conversation_ids:
         for item in list_active_conversations_by_ids(message_conversation_ids):
@@ -80,7 +92,16 @@ def execute_chat_search_query(user, params: ChatSearchQueryParams) -> dict:
         )
     return {
         "keyword": keyword,
-        "conversations": [{"id": item.id, "type": item.type, "name": conversation_payload_map[item.id]["name"], "access_mode": conversation_payload_map[item.id]["access_mode"]} for item in conversations],
+        "conversations": [
+            {
+                "id": item.id,
+                "type": item.type,
+                "name": conversation_payload_map[item.id]["name"],
+                "access_mode": conversation_payload_map[item.id]["access_mode"],
+                "capabilities": conversation_payload_map[item.id].get("capabilities", {}),
+            }
+            for item in conversations
+        ],
         "users": users_payload,
         "messages": [{"conversation_id": item.conversation_id, "conversation_name": conversation_payload_map[item.conversation_id]["name"], "message_id": item.id, "sequence": item.sequence, "message_type": item.message_type, "content_preview": item.content[:80], "sender": None if item.sender is None else user_brief(item.sender), "created_at": to_serializable_datetime(item.created_at)} for item in messages],
     }

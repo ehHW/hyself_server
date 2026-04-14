@@ -12,15 +12,17 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.test import APIClient
 
-from bbot.asset_compat import ensure_asset_reference_for_uploaded_file
-from bbot.models import AssetReference, UploadedFile
-from bbot_server.asgi import application
-from bbot.tasks import merge_large_file_task
+from hyself.asset_compat import ensure_asset_reference_for_uploaded_file
+from hyself.models import AssetReference, UploadedFile
+from hyself_server.asgi import application
+from hyself.tasks import merge_large_file_task
+from chat.application.commands import execute_disband_group_conversation_command, execute_leave_group_conversation_command, execute_mute_group_member_command, execute_remove_group_member_command, execute_transfer_group_owner_command
+from chat.application.commands.friendships import execute_submit_friend_request_command
 from chat.domain.access import get_conversation_access
 from chat.models import ChatConversation, ChatConversationMember, ChatMessage
 from chat.models import ChatFriendship, ChatGroupConfig, ChatGroupJoinRequest, build_pair_key
-from user.models import User
-from utils.upload import get_temp_root
+from user.models import Permission, Role, User
+from hyself.utils.upload import get_temp_root
 from ws.event_bus import build_event
 
 
@@ -71,6 +73,11 @@ class ChatAttachmentMessageTests(TestCase):
 		self.user = User.objects.create_user(username="chat_sender", password="Test123456")
 		self.friend = User.objects.create_user(username="chat_receiver", password="Test123456")
 		self.third_user = User.objects.create_user(username="chat_third", password="Test123456")
+		self.chat_role, _ = Role.objects.get_or_create(name="聊天测试角色", defaults={"description": "聊天测试使用"})
+		self.chat_role.permissions.set(Permission.objects.filter(code__startswith="chat."))
+		self.user.roles.add(self.chat_role)
+		self.friend.roles.add(self.chat_role)
+		self.third_user.roles.add(self.chat_role)
 		self.client.force_authenticate(self.user)
 		self.conversation = ChatConversation.objects.create(
 			type=ChatConversation.Type.DIRECT,
@@ -294,6 +301,42 @@ class ChatAttachmentMessageTests(TestCase):
 		})
 		member.refresh_from_db()
 		self.assertTrue(member.show_in_list)
+
+	def test_discover_search_returns_group_results_for_non_members(self):
+		response = self.client.get(
+			"/api/chat/search/",
+			{"keyword": "测试群", "scope": "discover"},
+		)
+
+		self.assertEqual(response.status_code, 200)
+		body = response.json()
+		self.assertTrue(any(item["id"] == self.group_conversation.id for item in body["conversations"]))
+		self.assertEqual(body["conversations"][0]["access_mode"], "discover_preview")
+		self.assertTrue(body["conversations"][0]["capabilities"]["can_join"])
+		self.assertFalse(body["conversations"][0]["capabilities"]["can_open"])
+
+	def test_removed_group_member_can_read_history_in_readonly_mode(self):
+		ChatMessage.objects.create(
+			conversation=self.group_conversation,
+			sequence=1,
+			sender=self.user,
+			message_type=ChatMessage.MessageType.TEXT,
+			content="before removal",
+		)
+		execute_remove_group_member_command(self.user, self.group_conversation.id, self.third_user.id)
+		self.client.force_authenticate(self.third_user)
+
+		response = self.client.get(
+			f"/api/chat/conversations/{self.group_conversation.id}/messages/"
+		)
+
+		self.assertEqual(response.status_code, 200)
+		body = response.json()
+		self.assertEqual(body["conversation"]["access_mode"], "former_member_readonly")
+		self.assertFalse(body["conversation"]["can_send_message"])
+		self.assertTrue(body["conversation"]["capabilities"]["can_read_history"])
+		self.assertFalse(body["conversation"]["capabilities"]["can_view_members"])
+		self.assertEqual(body["items"][0]["content"], "before removal")
 
 	def test_forward_messages_api_copies_text_message_to_target_conversation(self):
 		self._create_active_friendship()
@@ -567,6 +610,70 @@ class ChatAttachmentMessageTests(TestCase):
 		self.assertEqual(join_request.request_type, ChatGroupJoinRequest.RequestType.APPLICATION)
 		self.assertEqual(join_request.status, ChatGroupJoinRequest.Status.PENDING)
 
+	def test_apply_group_from_discover_without_inviter_creates_pending_join_request(self):
+		self.client.force_authenticate(self.friend)
+		response = self.client.post(
+			"/api/chat/group-invitations/apply/",
+			{"conversation_id": self.group_conversation.id},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 200)
+		body = response.json()
+		self.assertEqual(body["mode"], "pending_approval")
+		self.assertEqual(body["detail"], "入群申请已提交，等待群管理员审批")
+		join_request = ChatGroupJoinRequest.objects.get(conversation=self.group_conversation, target_user=self.friend)
+		self.assertEqual(join_request.request_type, ChatGroupJoinRequest.RequestType.APPLICATION)
+		self.assertEqual(join_request.status, ChatGroupJoinRequest.Status.PENDING)
+
+	def test_open_direct_conversation_api_returns_full_conversation_payload(self):
+		response = self.client.post(
+			"/api/chat/conversations/direct/open/",
+			{"target_user_id": self.friend.id},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 200)
+		body = response.json()
+		self.assertEqual(body["conversation"]["type"], ChatConversation.Type.DIRECT)
+		self.assertIn("capabilities", body["conversation"])
+		self.assertTrue(body["conversation"]["capabilities"]["can_open"])
+
+	def test_create_group_conversation_api_returns_full_conversation_payload(self):
+		response = self.client.post(
+			"/api/chat/conversations/groups/",
+			{
+				"name": "新建群聊",
+				"member_user_ids": [self.friend.id],
+				"join_approval_required": True,
+				"allow_member_invite": True,
+			},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 201)
+		body = response.json()
+		self.assertEqual(body["conversation"]["name"], "新建群聊")
+		self.assertIn("capabilities", body["conversation"])
+		self.assertTrue(body["conversation"]["capabilities"]["can_manage_group_settings"])
+
+	def test_auto_accepted_friendship_event_contains_full_conversation_payload(self):
+		execute_submit_friend_request_command(self.friend, self.user.id, "hi")
+
+		with patch("chat.application.commands.friendships.notify_chat_friendship_updated") as notify_mock:
+			result = execute_submit_friend_request_command(self.user, self.friend.id, "back")
+
+		self.assertEqual(result.payload["mode"], "auto_accepted")
+		self.assertIn("capabilities", result.payload["conversation"])
+		self.assertTrue(result.payload["conversation"]["capabilities"]["can_open"])
+		self.assertEqual(notify_mock.call_count, 2)
+		for call in notify_mock.call_args_list:
+			payload = call.args[1]
+			self.assertEqual(payload["action"], "accepted")
+			self.assertIn("conversation", payload)
+			self.assertIn("capabilities", payload["conversation"])
+			self.assertTrue(payload["conversation"]["capabilities"]["can_open"])
+
 	def test_handle_group_join_request_returns_serializable_payload(self):
 		join_request = ChatGroupJoinRequest.objects.create(
 			conversation=self.group_conversation,
@@ -623,7 +730,11 @@ class ChatAttachmentMessageTests(TestCase):
 			)
 
 		self.assertEqual(response.status_code, 200)
-		notify_mock.assert_not_called()
+		notify_mock.assert_called_once_with(
+			self.third_user.id,
+			"你已成为新的群主",
+			{"conversation_id": self.group_conversation.id, "notice_type": "group_owner_transferred"},
+		)
 
 	def test_mute_member_with_zero_minutes_clears_mute(self):
 		member = ChatConversationMember.objects.get(conversation=self.group_conversation, user=self.third_user)
@@ -661,6 +772,169 @@ class ChatAttachmentMessageTests(TestCase):
 		self.assertFalse(admin_access.can_send_message)
 		self.assertFalse(member_access.can_send_message)
 
+	def test_group_admin_cannot_remove_another_group_admin(self):
+		another_admin = User.objects.create_user(username="chat_admin_target", password="Test123456")
+		ChatConversationMember.objects.create(
+			conversation=self.group_conversation,
+			user=another_admin,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.ADMIN,
+			show_in_list=True,
+		)
+
+		with self.assertRaisesMessage(PermissionError, "群管理员不能操作另一位群管理员"):
+			execute_remove_group_member_command(self.third_user, self.group_conversation.id, another_admin.id)
+
+	def test_group_admin_cannot_mute_another_group_admin(self):
+		another_admin = User.objects.create_user(username="chat_admin_target_2", password="Test123456")
+		ChatConversationMember.objects.create(
+			conversation=self.group_conversation,
+			user=another_admin,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.ADMIN,
+			show_in_list=True,
+		)
+
+		with self.assertRaisesMessage(PermissionError, "群管理员不能操作另一位群管理员"):
+			execute_mute_group_member_command(self.third_user, self.group_conversation.id, another_admin.id, 10, "测试禁言")
+
+	def test_group_owner_leave_transfers_owner_to_existing_admin(self):
+		payload = execute_leave_group_conversation_command(
+			self.user,
+			self.group_conversation.id,
+		)
+
+		self.assertEqual(payload["conversation_id"], self.group_conversation.id)
+		self.group_conversation.refresh_from_db()
+		owner_member = ChatConversationMember.objects.get(
+			conversation=self.group_conversation,
+			user=self.third_user,
+		)
+		left_member = ChatConversationMember.objects.get(
+			conversation=self.group_conversation,
+			user=self.user,
+		)
+		self.assertEqual(self.group_conversation.owner_id, self.third_user.id)
+		self.assertEqual(owner_member.role, ChatConversationMember.Role.OWNER)
+		self.assertEqual(left_member.status, ChatConversationMember.Status.LEFT)
+		self.assertEqual(left_member.role, ChatConversationMember.Role.MEMBER)
+
+	def test_group_owner_leave_transfers_owner_to_member_when_no_admin_exists(self):
+		member_user = User.objects.create_user(username="chat_group_member", password="Test123456")
+		ChatConversationMember.objects.create(
+			conversation=self.group_conversation,
+			user=member_user,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.MEMBER,
+			show_in_list=True,
+		)
+		third_member = ChatConversationMember.objects.get(
+			conversation=self.group_conversation,
+			user=self.third_user,
+		)
+		third_member.role = ChatConversationMember.Role.MEMBER
+		third_member.save(update_fields=["role", "updated_at"])
+
+		payload = execute_leave_group_conversation_command(
+			self.user,
+			self.group_conversation.id,
+		)
+
+		self.assertEqual(payload["conversation_id"], self.group_conversation.id)
+		self.group_conversation.refresh_from_db()
+		promoted_member = ChatConversationMember.objects.get(
+			conversation=self.group_conversation,
+			user=self.group_conversation.owner,
+		)
+		self.assertEqual(promoted_member.role, ChatConversationMember.Role.OWNER)
+		self.assertIn(self.group_conversation.owner_id, {self.third_user.id, member_user.id})
+
+	def test_group_owner_can_update_group_config_without_manage_group_permission_gate(self):
+		with patch("chat.interfaces.api.endpoints.groups.ensure_request_permission") as permission_mock:
+			response = self.client.patch(
+				f"/api/chat/conversations/{self.group_conversation.id}/group-config/",
+				{"name": "新的群名称"},
+				format="json",
+			)
+
+		self.assertEqual(response.status_code, 200)
+		permission_mock.assert_not_called()
+		self.group_conversation.refresh_from_db()
+		self.assertEqual(self.group_conversation.name, "新的群名称")
+
+	def test_group_admin_can_mute_member_without_manage_group_permission_gate(self):
+		member_user = User.objects.create_user(username="chat_group_member_mute", password="Test123456")
+		ChatConversationMember.objects.create(
+			conversation=self.group_conversation,
+			user=member_user,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.MEMBER,
+			show_in_list=True,
+		)
+		self.client.force_authenticate(self.third_user)
+		with patch("chat.interfaces.api.endpoints.groups.ensure_request_permission") as permission_mock:
+			response = self.client.post(
+				f"/api/chat/conversations/{self.group_conversation.id}/members/{member_user.id}/mute/",
+				{"mute_minutes": 10},
+				format="json",
+			)
+
+		self.assertEqual(response.status_code, 200)
+		permission_mock.assert_not_called()
+		target_member = ChatConversationMember.objects.get(
+			conversation=self.group_conversation,
+			user=member_user,
+		)
+		self.assertIsNotNone(target_member.mute_until)
+
+	def test_transfer_group_owner_promotes_target_and_keeps_old_owner_as_admin(self):
+		payload = execute_transfer_group_owner_command(
+			self.user,
+			self.group_conversation.id,
+			self.third_user.id,
+		)
+
+		self.assertEqual(payload["target_user_id"], self.third_user.id)
+		self.group_conversation.refresh_from_db()
+		old_owner_member = ChatConversationMember.objects.get(
+			conversation=self.group_conversation,
+			user=self.user,
+		)
+		target_member = ChatConversationMember.objects.get(
+			conversation=self.group_conversation,
+			user=self.third_user,
+		)
+		self.assertEqual(self.group_conversation.owner_id, self.third_user.id)
+		self.assertEqual(old_owner_member.role, ChatConversationMember.Role.ADMIN)
+		self.assertEqual(target_member.role, ChatConversationMember.Role.OWNER)
+
+	def test_disband_group_conversation_marks_conversation_disbanded(self):
+		member_user = User.objects.create_user(username="chat_group_member_disband", password="Test123456")
+		ChatConversationMember.objects.create(
+			conversation=self.group_conversation,
+			user=member_user,
+			status=ChatConversationMember.Status.ACTIVE,
+			role=ChatConversationMember.Role.MEMBER,
+			show_in_list=True,
+		)
+
+		payload = execute_disband_group_conversation_command(
+			self.user,
+			self.group_conversation.id,
+		)
+
+		self.assertEqual(payload["conversation_id"], self.group_conversation.id)
+		self.group_conversation.refresh_from_db()
+		self.assertEqual(self.group_conversation.status, ChatConversation.Status.DISBANDED)
+		self.assertIsNone(self.group_conversation.owner_id)
+		self.assertEqual(
+			ChatConversationMember.objects.filter(
+				conversation=self.group_conversation,
+				status=ChatConversationMember.Status.ACTIVE,
+			).count(),
+			0,
+		)
+
 
 @override_settings(
 	MEDIA_URL="/media/",
@@ -678,6 +952,10 @@ class ChatAttachmentRealtimeWsTests(TransactionTestCase):
 		self.override.enable()
 		self.user = User.objects.create_user(username="ws_sender", password="Test123456")
 		self.friend = User.objects.create_user(username="ws_receiver", password="Test123456")
+		self.chat_role, _ = Role.objects.get_or_create(name="聊天测试角色_ws", defaults={"description": "聊天 WS 测试使用"})
+		self.chat_role.permissions.set(Permission.objects.filter(code__in=["chat.view_conversation", "chat.send_message", "chat.send_attachment"]))
+		self.user.roles.add(self.chat_role)
+		self.friend.roles.add(self.chat_role)
 		self.conversation = ChatConversation.objects.create(
 			type=ChatConversation.Type.DIRECT,
 			status=ChatConversation.Status.ACTIVE,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bbot.models import AssetReference
+from hyself.models import AssetReference
 
 
 def get_asset_reference_with_asset(reference_id: int):

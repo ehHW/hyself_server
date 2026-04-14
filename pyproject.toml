@@ -1,7 +1,7 @@
 [project]
-name = "bbot-server"
+name = "hyself_server"
 version = "0.1.0"
-description = "Bbot 服务端项目"
+description = "hyself 服务端项目"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
