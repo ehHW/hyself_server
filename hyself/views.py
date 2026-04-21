@@ -1,5 +1,4 @@
 from auth.permissions import AuthenticatedPermission as IsAuthenticated, ensure_request_permission
-from django.contrib.auth import get_user_model
 from django.http import JsonResponse
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -26,14 +25,10 @@ from hyself.application.payloads.resource_center import (
     build_uploaded_file_payload,
 )
 from hyself.application.queries.resource_center import (
-    build_system_parent_listing_payload,
-    build_system_root_listing_payload,
-    build_system_search_payload,
-    build_user_parent_listing_payload,
-    build_user_search_payload,
-    build_virtual_path_listing_payload,
+    build_scoped_file_entries_payload,
+    build_scoped_search_payload,
 )
-from hyself.application.services.resource_center import entry_is_within_recycle_bin_tree, get_scoped_parent_dir, is_system_scope_request
+from hyself.application.services.resource_center import entry_is_within_recycle_bin_tree, is_system_scope_request
 from hyself.recycle_bin import (
     list_recycle_bin_entries,
 )
@@ -42,11 +37,6 @@ from hyself.utils.upload import (
     get_user_upload_root,
 )
 from hyself.validators import parse_category, parse_owner_user_id, parse_parent_id, parse_virtual_path
-
-
-User = get_user_model()
-
-
 def index(request):
     return JsonResponse({"data": "你好，世界"})
 
@@ -83,30 +73,21 @@ class FileEntriesAPIView(APIView):
         parent_id = parse_parent_id(request.query_params.get("parent_id"))
         owner_user_id = parse_owner_user_id(request.query_params.get("owner_user_id")) if system_scope else None
         virtual_path = parse_virtual_path(request.query_params.get("virtual_path")) if system_scope else None
-        owner_user = None
-        if system_scope and owner_user_id is not None:
-            owner_user = User.objects.filter(id=owner_user_id, deleted_at__isnull=True).first()
-            if owner_user is None:
-                return Response({"detail": "目标用户不存在"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            payload = build_scoped_file_entries_payload(
+                user=request.user,
+                system_scope=system_scope,
+                parent_id=parent_id,
+                owner_user_id=owner_user_id,
+                virtual_path=virtual_path,
+            )
+        except ValidationError as exc:
+            return _response_from_validation_error(
+                exc,
+                not_found_details=("目标用户不存在", "目录不存在"),
+            )
 
-        if system_scope and virtual_path:
-            try:
-                payload = build_virtual_path_listing_payload(virtual_path)
-            except FileNotFoundError:
-                return Response({"detail": "目录不存在"}, status=status.HTTP_404_NOT_FOUND)
-            return Response(payload)
-
-        if system_scope and parent_id is None and owner_user_id is None:
-            return Response(build_system_root_listing_payload())
-
-        parent = get_scoped_parent_dir(owner_user or request.user, parent_id, system_scope=system_scope)
-        if parent_id is not None and parent is None:
-            return Response({"detail": "目录不存在"}, status=status.HTTP_404_NOT_FOUND)
-
-        if system_scope:
-            return Response(build_system_parent_listing_payload(parent, owner_user=owner_user))
-
-        return Response(build_user_parent_listing_payload(request.user, parent))
+        return Response(payload)
 
 
 class SearchFileEntriesAPIView(APIView):
@@ -130,10 +111,15 @@ class SearchFileEntriesAPIView(APIView):
             limit = 50
         limit = max(1, min(limit, 200))
 
-        if system_scope:
-            return Response(build_system_search_payload(keyword, limit, owner_user_id=owner_user_id))
-
-        return Response(build_user_search_payload(request.user, keyword, limit))
+        return Response(
+            build_scoped_search_payload(
+                user=request.user,
+                system_scope=system_scope,
+                keyword=keyword,
+                limit=limit,
+                owner_user_id=owner_user_id,
+            )
+        )
 
 
 class CreateFolderAPIView(APIView):

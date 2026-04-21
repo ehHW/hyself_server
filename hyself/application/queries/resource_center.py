@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django.contrib.auth import get_user_model
+from rest_framework.exceptions import ValidationError
 
 from hyself.asset_compat import ensure_asset_compat_for_uploaded_file
 from hyself.application.payloads.resource_center import (
@@ -15,6 +16,7 @@ from hyself.application.services.resource_center import (
     build_video_artifacts_root_payload,
     ensure_asset_refs_for_entries,
     entry_is_within_recycle_bin_tree,
+    get_scoped_parent_dir,
     resolve_video_artifact_virtual_items,
 )
 from hyself.models import AssetReference, UploadedFile
@@ -22,6 +24,58 @@ from hyself.recycle_bin import is_recycle_bin_folder
 
 
 User = get_user_model()
+
+
+def _resolve_active_system_owner(owner_user_id: int | None):
+    if owner_user_id is None:
+        return None
+
+    owner_user = User.objects.filter(id=owner_user_id, deleted_at__isnull=True).first()
+    if owner_user is None:
+        raise ValidationError({"detail": "目标用户不存在"})
+    return owner_user
+
+
+def build_scoped_file_entries_payload(
+    *,
+    user,
+    system_scope: bool,
+    parent_id: int | None,
+    owner_user_id: int | None = None,
+    virtual_path: str | None = None,
+) -> dict:
+    owner_user = _resolve_active_system_owner(owner_user_id) if system_scope else None
+
+    if system_scope and virtual_path:
+        try:
+            return build_virtual_path_listing_payload(virtual_path)
+        except FileNotFoundError as exc:
+            raise ValidationError({"detail": "目录不存在"}) from exc
+
+    if system_scope and parent_id is None and owner_user_id is None:
+        return build_system_root_listing_payload()
+
+    parent = get_scoped_parent_dir(owner_user or user, parent_id, system_scope=system_scope)
+    if parent_id is not None and parent is None:
+        raise ValidationError({"detail": "目录不存在"})
+
+    if system_scope:
+        return build_system_parent_listing_payload(parent, owner_user=owner_user)
+
+    return build_user_parent_listing_payload(user, parent)
+
+
+def build_scoped_search_payload(
+    *,
+    user,
+    system_scope: bool,
+    keyword: str,
+    limit: int,
+    owner_user_id: int | None = None,
+) -> dict:
+    if system_scope:
+        return build_system_search_payload(keyword, limit, owner_user_id=owner_user_id)
+    return build_user_search_payload(user, keyword, limit)
 
 
 def build_system_root_listing_payload() -> dict:
