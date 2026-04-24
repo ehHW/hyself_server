@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from django.conf import settings
 from rest_framework.exceptions import ValidationError
 
 from hyself.asset_compat import create_user_profile_asset_reference, ensure_asset_compat_for_uploaded_file
@@ -38,6 +39,16 @@ from hyself.utils.upload import (
 from hyself.validators import validate_avatar_upload_file
 
 
+UPLOAD_MAX_FILE_SIZE = int(getattr(settings, "UPLOAD_MAX_FILE_SIZE", 1024 * 1024 * 1024))
+
+
+def _validate_upload_file_size(file_size: int) -> None:
+    if file_size <= 0:
+        raise ValidationError({"detail": "file_size不合法"})
+    if file_size > UPLOAD_MAX_FILE_SIZE:
+        raise ValidationError({"detail": f"文件不能超过 {UPLOAD_MAX_FILE_SIZE // 1024 // 1024}MB"})
+
+
 class UploadMergeServiceUnavailableError(Exception):
     def __init__(self, detail: str, hint: str):
         super().__init__(detail)
@@ -68,6 +79,8 @@ def create_folder_entry(*, user, parent_id: int | None, folder_name: str) -> Upl
 
 
 def process_small_file_upload(*, user, file_obj, category: str, parent_id: int | None, relative_path: str) -> dict:
+    _validate_upload_file_size(int(getattr(file_obj, "size", 0) or 0))
+
     parent = get_parent_dir(user, parent_id)
     if parent_id is not None and parent is None:
         raise ValidationError({"detail": "目标目录不存在"})
@@ -160,6 +173,8 @@ def process_small_file_upload(*, user, file_obj, category: str, parent_id: int |
 
 
 def precheck_file_upload(*, user, file_md5: str, file_name: str, file_size: int, parent_id: int | None, relative_path: str) -> dict:
+    _validate_upload_file_size(int(file_size or 0))
+
     parent = get_parent_dir(user, parent_id)
     if parent_id is not None and parent is None:
         raise ValidationError({"detail": "目标目录不存在"})
@@ -209,6 +224,8 @@ def store_upload_chunk(*, user, file_md5: str, chunk_index: int, chunk_md5: str,
 
 
 def submit_large_file_merge(*, user, file_md5: str, total_md5: str, file_name: str, total_chunks: int, file_size: int, parent_id: int | None, relative_path: str, category: str) -> dict:
+    _validate_upload_file_size(int(file_size or 0))
+
     parent = get_parent_dir(user, parent_id)
     if parent_id is not None and parent is None:
         raise ValidationError({"detail": "目标目录不存在"})

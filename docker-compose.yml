@@ -39,7 +39,7 @@ services:
 
   # ── ASGI 后端（uvicorn） ─────────────────────────────────────
   backend:
-    image: hyself_server-backend:${IMAGE_TAG:-1.0.0}
+    image: hyself_server-backend:1.1.0
     build:
       context: .
     container_name: hyself_backend
@@ -78,7 +78,7 @@ services:
 
   # ── Celery Worker ────────────────────────────────────────────
   celery:
-    image: hyself_server-celery:${IMAGE_TAG:-1.0.0}
+    image: hyself_server-celery:1.1.0
     build:
       context: .
     container_name: hyself_celery

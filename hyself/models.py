@@ -194,3 +194,78 @@ class AssetReference(SoftDeleteModel):
 
 	def __str__(self) -> str:
 		return f"{self.display_name or self.ref_object_id}({self.ref_domain}:{self.ref_type})"
+
+
+class SystemSetting(models.Model):
+	singleton_key = models.CharField(max_length=32, unique=True, default="default", verbose_name="单例键")
+	system_title = models.CharField(max_length=255, blank=True, default="", verbose_name="系统标题")
+	announcement_content_max_length = models.PositiveIntegerField(default=300, verbose_name="公告内容最大字数")
+	maintenance_enabled = models.BooleanField(default=False, db_index=True, verbose_name="是否启用系统维护")
+	maintenance_scheduled_at = models.DateTimeField(null=True, blank=True, default=None, verbose_name="维护开始时间")
+	maintenance_activated_at = models.DateTimeField(null=True, blank=True, default=None, verbose_name="维护实际激活时间")
+	maintenance_processed_at = models.DateTimeField(null=True, blank=True, default=None, verbose_name="维护动作处理时间")
+	updated_by = models.ForeignKey(
+		settings.AUTH_USER_MODEL,
+		null=True,
+		blank=True,
+		on_delete=models.SET_NULL,
+		related_name="updated_system_settings",
+		verbose_name="最后操作人",
+	)
+	created_at = models.DateTimeField(default=timezone.now, editable=False)
+	updated_at = models.DateTimeField(auto_now=True)
+
+	class Meta:
+		db_table = "hyself_system_setting"
+
+	def __str__(self) -> str:
+		return f"SystemSetting<{self.singleton_key}>"
+
+
+class SystemAnnouncement(SoftDeleteModel):
+	title = models.CharField(max_length=255, verbose_name="公告标题")
+	content = models.TextField(verbose_name="公告内容")
+	published_by = models.ForeignKey(
+		settings.AUTH_USER_MODEL,
+		null=True,
+		blank=True,
+		on_delete=models.SET_NULL,
+		related_name="published_system_announcements",
+		verbose_name="发布人",
+	)
+	published_at = models.DateTimeField(default=timezone.now, db_index=True, verbose_name="发布时间")
+
+	class Meta:
+		db_table = "hyself_system_announcement"
+		ordering = ["-published_at", "-id"]
+
+	def __str__(self) -> str:
+		return self.title
+
+
+class SystemAnnouncementRead(models.Model):
+	announcement = models.ForeignKey(
+		SystemAnnouncement,
+		on_delete=models.CASCADE,
+		related_name="read_records",
+		verbose_name="公告",
+	)
+	user = models.ForeignKey(
+		settings.AUTH_USER_MODEL,
+		on_delete=models.CASCADE,
+		related_name="system_announcement_reads",
+		verbose_name="用户",
+	)
+	read_at = models.DateTimeField(default=timezone.now, verbose_name="已读时间")
+
+	class Meta:
+		db_table = "hyself_system_announcement_read"
+		constraints = [
+			models.UniqueConstraint(fields=["announcement", "user"], name="uq_system_announcement_read_user"),
+		]
+		indexes = [
+			models.Index(fields=["user", "read_at"]),
+		]
+
+	def __str__(self) -> str:
+		return f"SystemAnnouncementRead<{self.announcement_id}:{self.user_id}>"

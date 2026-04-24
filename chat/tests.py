@@ -9,6 +9,7 @@ from asgiref.sync import async_to_sync
 from asgiref.testing import ApplicationCommunicator
 from channels.layers import get_channel_layer
 from django.test import TestCase, TransactionTestCase, override_settings
+from rest_framework.exceptions import PermissionDenied
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.test import APIClient
 
@@ -19,6 +20,8 @@ from hyself.tasks import merge_large_file_task
 from chat.application.commands import execute_disband_group_conversation_command, execute_leave_group_conversation_command, execute_mute_group_member_command, execute_remove_group_member_command, execute_transfer_group_owner_command
 from chat.application.commands.delivery import build_message_delivery_payloads
 from chat.application.commands.friendships import execute_submit_friend_request_command
+from chat.application.commands.attachments import execute_send_asset_message_command
+from chat.application.commands.realtime import execute_send_text_message_command
 from chat.domain.access import get_conversation_access
 from chat.domain.preferences import get_or_create_user_preference
 from chat.domain.serialization import serialize_conversation
@@ -194,6 +197,51 @@ class ChatAttachmentMessageTests(TestCase):
 
 		self.assertEqual(response.status_code, 403)
 		self.assertEqual(response.json()["detail"], "你们还不是好友，当前私聊暂不支持发送附件")
+
+	def test_send_attachment_command_rejected_for_non_friend_direct_conversation(self):
+		uploaded = UploadedFile.objects.create(
+			created_by=self.user,
+			parent=None,
+			is_dir=False,
+			display_name="restricted-command.pdf",
+			stored_name="restricted-command.pdf",
+			relative_path="users/chat_sender_1/restricted-command.pdf",
+			file_size=128,
+			file_md5="d" * 32,
+		)
+		source_reference = ensure_asset_reference_for_uploaded_file(uploaded)
+
+		with self.assertRaisesMessage(PermissionDenied, "你们还不是好友，当前私聊暂不支持发送附件"):
+			execute_send_asset_message_command(
+				self.user,
+				self.conversation.id,
+				source_asset_reference_id=source_reference.id,
+			)
+
+	def test_send_text_message_allowed_for_non_friend_direct_conversation(self):
+		result = execute_send_text_message_command(
+			self.user,
+			self.conversation.id,
+			content="陌生人文本消息",
+		)
+
+		self.assertEqual(result["detail"], "消息已发送")
+		message = ChatMessage.objects.get(id=result["message"]["id"])
+		self.assertEqual(message.content, "陌生人文本消息")
+
+	def test_send_text_message_rejected_after_friendship_deleted(self):
+		friendship = self._create_active_friendship()
+		friendship.status = ChatFriendship.Status.DELETED
+		friendship.deleted_at = friendship.accepted_at
+		friendship.save(update_fields=["status", "deleted_at", "updated_at"])
+		self.assertFalse(get_conversation_access(self.user, self.conversation).can_send_message)
+
+		with self.assertRaisesMessage(PermissionDenied, "当前无权发送消息"):
+			execute_send_text_message_command(
+				self.user,
+				self.conversation.id,
+				content="删除好友后尝试发送",
+			)
 
 	def test_send_attachment_message_allowed_for_self_direct_conversation(self):
 		self_conversation = ChatConversation.objects.create(

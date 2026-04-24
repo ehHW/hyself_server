@@ -5,8 +5,9 @@ from dataclasses import dataclass
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 
+from chat.domain.friendships import get_friendship_between
 from chat.domain.preferences import get_or_create_user_preference
-from chat.models import ChatConversation, ChatConversationMember
+from chat.models import ChatConversation, ChatConversationMember, ChatFriendship
 
 
 @dataclass
@@ -122,6 +123,20 @@ def get_conversation_access(user, conversation: ChatConversation) -> Conversatio
     if member:
         mute_active = bool(member.mute_until and member.mute_until > timezone.now())
         can_send = conversation.status == ChatConversation.Status.ACTIVE and not mute_active
+        if conversation.type == ChatConversation.Type.DIRECT:
+            peer_user_id = (
+                ChatConversationMember.objects.filter(
+                    conversation=conversation,
+                    status=ChatConversationMember.Status.ACTIVE,
+                )
+                .exclude(user_id=user.id)
+                .values_list("user_id", flat=True)
+                .first()
+            )
+            if peer_user_id is not None:
+                friendship = get_friendship_between(user.id, peer_user_id)
+                if friendship is not None and friendship.status == ChatFriendship.Status.DELETED:
+                    can_send = False
         if conversation.type == ChatConversation.Type.GROUP and hasattr(conversation, "group_config") and conversation.group_config.mute_all and member.role != ChatConversationMember.Role.OWNER:
             can_send = False
         return ConversationAccess(

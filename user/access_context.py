@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from django.conf import settings
 
+from hyself.system_runtime import build_system_settings_payload
+
 from user.models import DEFAULT_USER_ROLE_NAME, Permission, Role
 
 
@@ -98,12 +100,6 @@ def build_permission_context_payload(user) -> dict[str, list[str]]:
     return {
         "permission_codes": permission_codes,
         "visible_menu_keys": resolve_visible_menu_keys(user, permission_codes),
-    }
-
-
-def build_system_settings_payload() -> dict[str, str]:
-    return {
-        "system_title": str(getattr(settings, "SYSTEM_TITLE", "Hyself 管理后台") or "Hyself 管理后台"),
     }
 
 

@@ -9,6 +9,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from hyself_server.celery import app as celery_app
 from chat.application.commands.realtime import execute_mark_conversation_read_command, execute_send_text_message_command
 from chat.application.queries.realtime import execute_chat_typing_query
+from hyself.system_runtime import ensure_maintenance_activated, is_current_maintenance_active
 from ws.events import build_ws_event
 from ws.input_serializers import (
     ChatMarkReadWsSerializer,
@@ -40,6 +41,13 @@ class GlobalWebSocketConsumer(AsyncJsonWebsocketConsumer):
         if not user or user.is_anonymous:
             await self.close(code=4401)
             return
+
+        maintenance_active = await database_sync_to_async(is_current_maintenance_active)()
+        if maintenance_active:
+            await database_sync_to_async(ensure_maintenance_activated)(actor=user if getattr(user, "is_superuser", False) else None)
+            if not getattr(user, "is_superuser", False):
+                await self.close(code=4403)
+                return
 
         self.user_group_name = f"ws_user_{user.id}"
         self.upload_task_groups: set[str] = set()

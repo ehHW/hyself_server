@@ -56,3 +56,5 @@ htmlcov/
 Thumbs.db
 
 nginx*
+*.tar
+*.tar.gz

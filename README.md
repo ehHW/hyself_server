@@ -259,6 +259,10 @@ hyself_server/
   manage.py
 ```
 
+## 相关文档
+
+- docs/implementation_notes/update-2026-04-24.md
+
 ## 联调建议
 
 1. 先确保 MySQL、Redis 已启动。

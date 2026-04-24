@@ -3,6 +3,11 @@ from __future__ import annotations
 from chat.models import ChatFriendship, build_pair_key
 
 
+def get_friendship_between(user_a_id: int, user_b_id: int) -> ChatFriendship | None:
+	pair_key = build_pair_key(user_a_id, user_b_id)
+	return ChatFriendship.objects.filter(pair_key=pair_key).first()
+
+
 def get_active_friendship_between(user_a_id: int, user_b_id: int) -> ChatFriendship | None:
     pair_key = build_pair_key(user_a_id, user_b_id)
     return ChatFriendship.objects.filter(pair_key=pair_key, status=ChatFriendship.Status.ACTIVE).first()

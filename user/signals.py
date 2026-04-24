@@ -38,6 +38,7 @@ DEFAULT_PERMISSIONS = [
     ("chat.delete_message", "删除消息显示记录"),
     ("chat.restore_revoked_message", "撤回后恢复到输入框"),
     ("chat.review_all_messages", "巡检查看全部聊天记录"),
+    ("system.publish_announcement", "发布系统公告"),
     ("game.view_leaderboard", "查看游戏排行榜"),
     ("game.submit_best_record", "提交游戏成绩"),
     ("entertainment.view_music", "查看音乐中心"),

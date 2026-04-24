@@ -20,6 +20,7 @@ env = environ.Env(
     CHANNEL_REDIS_URL=(str, "redis://127.0.0.1:6379/1"),
     CELERY_BROKER_URL=(str, "redis://127.0.0.1:6379/2"),
     CELERY_RESULT_BACKEND=(str, "redis://127.0.0.1:6379/3"),
+    UPLOAD_MAX_FILE_SIZE=(int, 1024 * 1024 * 1024),
 )
 
 environ.Env.read_env(BASE_DIR / ".env")
@@ -52,6 +53,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "auth.maintenance.SystemMaintenanceMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -151,6 +153,7 @@ MEDIA_ROOT = BASE_DIR / "uploads"
 
 UPLOAD_SMALL_FILE_THRESHOLD = 100 * 1024 * 1024
 UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024
+UPLOAD_MAX_FILE_SIZE = 1024 * 1024 * 1024
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 CORS_ALLOW_ALL_ORIGINS = env("CORS_ALLOW_ALL_ORIGINS")
